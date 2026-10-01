@@ -1,0 +1,57 @@
+﻿<UserControl x:Class="MusicBox.Pages.AboutPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:loc="clr-namespace:MusicBox.Services"
+             mc:Ignorable="d">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel MaxWidth="800" HorizontalAlignment="Left" Margin="0,0,10,10">
+            <Border Background="{DynamicResource CardBgBrush}" CornerRadius="12" Padding="22" Margin="0,0,0,16">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <Image x:Name="AppIcon" Width="76" Height="76" Stretch="Uniform"
+                           RenderOptions.BitmapScalingMode="HighQuality"/>
+                    <StackPanel VerticalAlignment="Center" Margin="18,0,0,0">
+                        <!-- 标题下面原来还有一句宣传语 + 一行版本号。用户要的是
+                             「Miku Music 只留一个版本号」，所以宣传语去掉，版本号只留这一行。 -->
+                        <TextBlock Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[about_title]}"
+                                   FontSize="26" FontWeight="Bold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                        <TextBlock x:Name="VersionText" Text="v2.1.0" FontSize="13"
+                                   Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,6,0,0"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <Border Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="18" Margin="0,0,0,16">
+                <StackPanel>
+                    <TextBlock Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[about_os_title]}"
+                               FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,6"/>
+                    <TextBlock Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[about_os_note]}"
+                               FontSize="12.5" Foreground="{DynamicResource TextSecondaryBrush}" TextWrapping="Wrap" Margin="0,0,0,10"/>
+
+                    <StackPanel x:Name="CreditsPanel"/>
+                </StackPanel>
+            </Border>
+
+            <!-- 「功能简介」这几句原来用的是很淡的灰色，叠在卡片蒙版上几乎看不清，
+                 改成和正文一样的主文字色。 -->
+            <Border Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="18">
+                <StackPanel>
+                    <TextBlock Text="功能简介" FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,8"/>
+                    <TextBlock FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}" TextWrapping="Wrap" Margin="0,3,0,0"
+                               Text="1. 本地音乐库：选择音乐文件夹后自动扫描歌曲/视频，双击即播，可搜索、右键标记跳过；B 站下载的歌曲自动入库；"/>
+                    <TextBlock FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}" TextWrapping="Wrap" Margin="0,3,0,0"
+                               Text="2. 搜索音乐：标题栏搜索框可同时检索网易云 / 酷狗 / QQ / B 站，四个源各自单选查看，结果自动去重，可查看评论；VIP/版权受限自动转 B 站音源；点 ♥ 收藏到本机，离线后仍可拉取该曲播放；"/>
+                    <TextBlock FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}" TextWrapping="Wrap" Margin="0,3,0,0"
+                               Text="3. 最近播放 / 收藏：本地记录最近播放与收藏列表，支持一键续播；"/>
+                    <TextBlock FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}" TextWrapping="Wrap" Margin="0,3,0,0"
+                               Text="4. 音效：内置 7 组音效预设（EQ 均衡、低音增强、混响、激励、压缩、立体声加宽、模拟环绕）；"/>
+                    <TextBlock FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}" TextWrapping="Wrap" Margin="0,3,0,0"
+                               Text="5. 外观与背景：深色 / 浅色两套主题，图片或视频背景，可调明暗与摆动动画；界面支持 简体中文 / 繁體中文 / English / Русский / 日本語 / 한국어 六种语言；"/>
+                    <TextBlock FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}" TextWrapping="Wrap" Margin="0,3,0,0"
+                               Text="6. B 站账号：内置 BBDown，可扫码登录并把 Cookie 仅保存在本机（可随时删除）。"/>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

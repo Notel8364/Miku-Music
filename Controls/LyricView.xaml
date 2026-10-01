@@ -1,0 +1,80 @@
+<UserControl x:Class="MusicBox.Controls.LyricView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:svc="clr-namespace:MusicBox.Services"
+             xmlns:local="clr-namespace:MusicBox.Controls"
+             mc:Ignorable="d"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             d:DesignHeight="420" d:DesignWidth="620"
+             ClipToBounds="True">
+    <!--
+        歌词字幕视图，做法参考 QQ 音乐 / 网易云音乐 PC 端的桌面歌词：
+
+        1) 每行固定行高（LineHeightPx），这样「把当前行滚到视口正中」
+           可以直接用 下标×行高 算出来，不用等布局测量，也就不用每帧
+           调 BringIntoView —— 那样会反复触发布局，滚起来一顿一顿的。
+        2) 一行画两遍：底层是整行的暗色文字，上层是同位置的亮色文字，
+           再用一个裁剪矩形按进度把上层「擦」出来。这就是卡拉OK式的
+           一字一字描色，比逐个 Run 改颜色更顺滑。
+        3) 离当前行越远的行越淡、字号越小。距离当前行的距离决定透明度，
+           这是 BetterLyrics 那类实现里最影响观感的一条：
+           所有行同时动会显得很吵，按距离分层之后滚动才有「景深」。
+        4) 用户手动滚轮翻歌词时暂停自动跟随，一停手 2.5 秒再接回来。
+    -->
+    <UserControl.Resources>
+    </UserControl.Resources>
+
+    <Grid>
+        <!-- 上下渐隐：歌词滚到边缘时淡出，而不是被硬切一刀 -->
+        <Grid.OpacityMask>
+            <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                <GradientStop Color="#00000000" Offset="0.0"/>
+                <GradientStop Color="#FF000000" Offset="0.16"/>
+                <GradientStop Color="#FF000000" Offset="0.84"/>
+                <GradientStop Color="#00000000" Offset="1.0"/>
+            </LinearGradientBrush>
+        </Grid.OpacityMask>
+
+        <ScrollViewer x:Name="Scroller"
+                      VerticalScrollBarVisibility="Disabled"
+                      HorizontalScrollBarVisibility="Disabled"
+                      CanContentScroll="False"
+                      PanningMode="VerticalOnly">
+            <!-- 直接用 StackPanel，不用 ItemsControl + VirtualizingStackPanel。
+                 之前那套会让 WPF 走 item container 生成路径，而行控件本身就是
+                 UIElement，容器样式套不上去，ApplyItemContainerStyle 抛异常；
+                 那个异常发生在渲染回调里没人接，整个进程直接崩。
+                 一首歌的歌词也就几十上百行，每行两个 TextBlock，
+                 不虚拟化完全扛得住，而行高固定才让居中偏移能直接算。 -->
+            <StackPanel x:Name="LinesHost" Focusable="False"/>
+        </ScrollViewer>
+
+        <!-- 手动翻过歌词后的提示条。以前 IsHitTestVisible="False"，纯装饰，
+             只能干等 2.5 秒自动接回；用户想立刻回到当前句却没处点，
+             只好去把窗口关掉重开——这正是「每次要我关掉才跟随」的由来。
+             现在做成可点的按钮：点一下立刻交回视口并继续跟随。 -->
+        <Button x:Name="ResumeHint"
+                VerticalAlignment="Top" HorizontalAlignment="Center"
+                Margin="0,10,0,0" Padding="14,6" Cursor="Hand"
+                Visibility="Collapsed" Click="ResumeHint_Click"
+                Background="#D9202020" BorderBrush="#40FFFFFF" BorderThickness="1">
+            <Button.Template>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            CornerRadius="13" Padding="{TemplateBinding Padding}">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="#F0303030"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Button.Template>
+            <TextBlock x:Name="ResumeHintText" Foreground="#FFFFFFFF" FontSize="12"/>
+        </Button>
+    </Grid>
+</UserControl>

@@ -1,0 +1,17 @@
+⚠ 备份 SurroundDsp.cs（模拟Hifi环绕效果器）调整前版本，便于回滚。
+
+时间：本次调整前
+
+原始常量 / 参数（在 SurroundEffectSampleProvider 中）：
+- HaasMs             = 26f      （侧环 Haas 延迟毫秒）
+- RearDelayMs        = 31f      （后环绕延迟毫秒）
+- RearLowpassHz      = 2500f    （后环绕低通）
+- BassHz             = 140f     （虚拟低音低通）
+- allpass 延迟        = 13ms，G = 0.62f
+- sideGain           = 1 + 0.55 * strength
+- decorrMix          = 0.5 * strength
+- rearGain           = 0.4 * strength
+- bassBoost          = 0.45 * strength
+- SoftClip           = |x|>1 ? tanh(x) : x
+
+调整方向：减小延迟量/延迟增益以去掉"回声"，对去相关成分做低通以去掉"耳鸣嘶嘶"。

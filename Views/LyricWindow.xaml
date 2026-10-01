@@ -1,0 +1,212 @@
+<Window x:Class="MusicBox.Views.LyricWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="clr-namespace:MusicBox.Controls"
+        Title="Lyrics"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        Topmost="True"
+        ShowInTaskbar="False"
+        ResizeMode="CanResize"
+        MinWidth="420" MinHeight="200"
+        SizeToContent="Manual"
+        FontFamily="Microsoft YaHei UI">
+
+    <Border x:Name="Root"
+            CornerRadius="12"
+            BorderThickness="1"
+            ClipToBounds="True"
+            Background="{DynamicResource FlyoutBgBrush}"
+            BorderBrush="{DynamicResource FlyoutBorderBrush}">
+        <Border.Effect>
+            <DropShadowEffect BlurRadius="26" ShadowDepth="4" Opacity="0.5" Color="#000000"/>
+        </Border.Effect>
+
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+
+<!-- 标题条：整行分成「悬停才显」和「常驻」两段。
+                 穿透按钮必须放在 DragBar 外面、单独一层：
+                 DragBar 在穿透态是 Opacity=0 的（竖横、翻译、关闭
+                 都跟着一起透明），把穿透按钮放进去它也会一起消失，
+                 而它恰恰是关掉穿透之后唯一不需要鼠标精确悬停就能点的入口。
+                 套一层 Grid 就是为了让它独立于 DragBar 的透明度。
+
+                 左边的歌名整块去掉了：这一行宽度有限，歌名一占位
+                 竖横/翻译/关闭就得往右边挤，而这几个键才是常用的。
+                 想知道在放哪首，看主窗口和托盘就行。 -->
+            <Grid Grid.Row="0" Height="30">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- 悬停段：竖横 + 翻译 + 关闭。放在中间一列居中，
+                     两边留等宽的 *，所以看起来是整条居中而不是贴右。 -->
+                <!-- 中间这组键整体居中：外层 * / Auto / * 三列，
+                     里面的「悬停段 + 常驻穿透键」是一个 Auto 宽的组合。 -->
+                <Grid Grid.Column="1">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- 悬停段：竖横 + 翻译 + 关闭 -->
+                <Grid x:Name="DragBar" Grid.Column="0" Background="Transparent"
+                      MouseLeftButtonDown="DragBar_MouseLeftButtonDown"
+                      MouseRightButtonUp="DragBar_MouseRightButtonUp">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- 竖/横切换：竖排是「上中下三句滚动」，横排是「单行字幕带」 -->
+                <ToggleButton x:Name="ModeButton" Grid.Column="0" Width="26" Height="22"
+                              Margin="0,0,2,0" VerticalAlignment="Center"
+                              Style="{StaticResource MiniToggleButton}"
+                              Click="ModeButton_Click"
+                              ToolTip="Vertical / Horizontal">
+                    <TextBlock x:Name="ModeGlyph" Text="&#xE8D2;" FontFamily="Segoe MDL2 Assets"
+                               FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </ToggleButton>
+
+                <ToggleButton x:Name="TranslationButton" Grid.Column="1" Width="26" Height="22"
+                              Margin="0,0,2,0" VerticalAlignment="Center"
+                              Style="{StaticResource MiniToggleButton}"
+                              Click="TranslationButton_Click"
+                              ToolTip="Translation">
+                    <TextBlock Text="&#xE8C1;" FontFamily="Segoe MDL2 Assets"
+                               FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </ToggleButton>
+
+                <!-- 关闭是 Button 不是 ToggleButton，套 MiniToggleButton 会在
+                     XAML 解析期报 TargetType 不匹配（整个窗口都建不出来）。
+                     这里给它一套等价的普通按钮模板。
+                     穿透态下这个键会被隐藏（见 ApplyPassthrough），
+                     免得「关掉弹窗」和「点不到字」互相打架——
+                     穿透开着的时候误点关闭只会让人找不到窗口。 -->
+                <Button x:Name="CloseButton" Grid.Column="2" Width="26" Height="22"
+                        VerticalAlignment="Center" Focusable="False"
+                        Background="Transparent" Cursor="Hand"
+                        Click="CloseButton_Click" ToolTip="Close">
+                    <Button.Template>
+                        <ControlTemplate TargetType="Button">
+                            <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="6">
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="Bd" Property="Background" Value="{DynamicResource SubtleFillHoverBrush}"/>
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Button.Template>
+                    <TextBlock Text="&#xE8BB;" FontFamily="Segoe MDL2 Assets"
+                               FontSize="11" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </Button>
+                </Grid>
+
+                <!-- 常驻段：鼠标穿透开关。穿透态下依然显示，
+                     否则「开了穿透就再也关不掉」——只能靠快捷键或托盘救。
+                     放在中间一列里，贴着上面那几个键。 -->
+                <ToggleButton x:Name="PassthroughButton" Grid.Column="1" Width="26" Height="22"
+                              Margin="4,0,4,0" VerticalAlignment="Center"
+                              Style="{StaticResource MiniToggleButton}"
+                              Click="PassthroughButton_Click"
+                              ToolTip="Click-through">
+                    <TextBlock Text="&#xE7F4;" FontFamily="Segoe MDL2 Assets"
+                               FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </ToggleButton>
+                </Grid>
+            </Grid>
+
+            <!-- 竖排：完整歌词滚动 -->
+            <controls:LyricView x:Name="VerticalView" Grid.Row="1" Visibility="Collapsed"/>
+
+            <!-- 横排：上中下三句。上一句、当前句、下一句各占一行。
+
+                 以前是三列并排（上一句靠右、当前句居中、下一句靠左），
+                 而当前句那层擦除控件横跨了三列并且居中，于是当前句一长
+                 就压到左右两段上，看起来就是「上一句和当前句挤在同一行、
+                 混成一团分不清谁是谁」。分行之后既不会重叠，
+                 每行也拿到了整幅宽度，超长句子不容易被裁。 -->
+            <Grid x:Name="HorizontalPanel" Grid.Row="1" Visibility="Collapsed">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <TextBlock x:Name="HorizPrev" Grid.Row="0" Margin="16,2"
+                           FontSize="12" Opacity="0.34" TextAlignment="Center"
+                           TextWrapping="Wrap" MaxHeight="32"
+                           Foreground="{DynamicResource TextSecondaryBrush}"
+                           TextTrimming="CharacterEllipsis"/>
+
+                <!-- 当前句。字号由代码按实际宽度自动缩（FitFontToWidth），
+                     所以再长的句子也不会被窗口边缘切掉。 -->
+                <Grid x:Name="HorizWipeHost" Grid.Row="1" Margin="16,2" ClipToBounds="True">
+                    <TextBlock x:Name="HorizCurBase"
+                               VerticalAlignment="Center" HorizontalAlignment="Center"
+                               TextAlignment="Center" TextWrapping="Wrap"
+                               Foreground="{DynamicResource TextTertiaryBrush}"/>
+                    <Border x:Name="HorizCurLitBorder" VerticalAlignment="Center" HorizontalAlignment="Center">
+                        <Border.Clip>
+                            <RectangleGeometry x:Name="HorizCurClip" Rect="0,0,0,200"/>
+                        </Border.Clip>
+                        <TextBlock x:Name="HorizCurLit"
+                                   VerticalAlignment="Center" HorizontalAlignment="Center"
+                                   TextAlignment="Center" TextWrapping="Wrap"
+                                   Foreground="{DynamicResource TextPrimaryBrush}"/>
+                    </Border>
+                </Grid>
+
+                <TextBlock x:Name="HorizNext" Grid.Row="2" Margin="16,2"
+                           FontSize="12" Opacity="0.34" TextAlignment="Center"
+                           TextWrapping="Wrap" MaxHeight="32"
+                           Foreground="{DynamicResource TextSecondaryBrush}"
+                           TextTrimming="CharacterEllipsis"/>
+
+                <!-- 翻译。外面套一个裁剪容器 + 两层文字：
+                     一层是正在显示的，一层是刚被顶掉的。
+                     「从左往右把前一句顶掉」这个效果必须有两层同时在动，
+                     单个 TextBlock 装不下两份内容。
+                     裁剪容器是必须的：两层都要能横向滑出边界，
+                     不裁的话旧翻译会飘到窗口外面去。 -->
+                <Grid x:Name="TransHost" Grid.Row="3" Margin="16,4,16,6"
+                      ClipToBounds="True" MinHeight="18">
+                    <TextBlock x:Name="HorizTranslationOut"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                               FontSize="13" TextAlignment="Center" TextWrapping="NoWrap"
+                               Foreground="{DynamicResource TextSecondaryBrush}"
+                               Opacity="0" IsHitTestVisible="False"/>
+                    <TextBlock x:Name="HorizTranslation"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                               FontSize="13" TextAlignment="Center" TextWrapping="NoWrap"
+                               MaxHeight="20" TextTrimming="CharacterEllipsis"
+                               Foreground="{DynamicResource TextSecondaryBrush}"/>
+                </Grid>
+            </Grid>
+
+            <!-- 空状态 / 加载中 -->
+            <TextBlock x:Name="StatusText" Grid.Row="1" VerticalAlignment="Center" HorizontalAlignment="Center"
+                       FontSize="13" TextWrapping="Wrap" TextAlignment="Center" Opacity="0.6"
+                       Foreground="{DynamicResource TextTertiaryBrush}"/>
+
+            <!-- 四边伸缩不再用角落 Thumb 了。
+                 WindowStyle=None + AllowsTransparency=True 时 WindowChrome 不生效，
+                 但消息循环还在：WM_NCHITTEST 里按鼠标离边的距离返回
+                 HTLEFT/HTRIGHT/HTTOP/HTBOTTOM…，系统自己就会画十字光标、
+                 自己处理拖拽缩放。见 WndProcHook 的 HitTestEdges。
+                 比 Thumb 好的地方：四条边都能拉，而且边缘不需要常驻一个
+                 看得见的把手（那个把手在穿透态还容易被误点）。 -->
+        </Grid>
+    </Border>
+</Window>

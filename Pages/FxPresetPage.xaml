@@ -1,0 +1,71 @@
+﻿<UserControl x:Class="MusicBox.Pages.FxPresetPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d">
+    <StackPanel MaxWidth="760" HorizontalAlignment="Left">
+        <TextBlock Text="音效" FontSize="28" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+        <TextBlock Text="选「关闭」以外的预设会自动开启模拟 Hifi 环绕/滤镜管线（EQ均衡 · 低音增强 · 混响 · 激励 · 压缩 · 立体声加宽 · 环绕）；「关闭」走系统播放器。"
+                   FontSize="13" Foreground="{DynamicResource TextSecondaryBrush}" TextWrapping="Wrap" Margin="0,6,0,14"/>
+
+        <!-- 预设卡 -->
+        <Border Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="18" Margin="0,0,0,16">
+            <StackPanel>
+                <TextBlock Text="音效预设" FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,10"/>
+                <StackPanel Orientation="Horizontal">
+                    <ComboBox x:Name="FxPresetCombo" Width="220" VerticalContentAlignment="Center"
+                              SelectionChanged="FxPresetCombo_SelectionChanged"/>
+                    <TextBlock x:Name="FxPresetDescText" VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextSecondaryBrush}" Margin="14,0,0,0"/>
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+        <!-- 均衡器卡 -->
+        <Border Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="18" Margin="0,0,0,16">
+            <StackPanel>
+                <DockPanel Margin="0,0,0,6">
+                    <TextBlock Text="均衡器（10段）" FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" DockPanel.Dock="Left"/>
+                    <Button x:Name="EqResetButton" DockPanel.Dock="Right" Padding="12,6"
+                            Style="{StaticResource GhostButtonStyle}"
+                            Click="EqResetButton_Click">复位</Button>
+                </DockPanel>
+                <TextBlock x:Name="EqHintText" FontSize="11.5" Foreground="{DynamicResource TextTertiaryBrush}" TextWrapping="Wrap" Margin="0,0,0,10"
+                           Text="调节任意频段后自动变为「自定义」。频段：31 62 125 250 500 1k 2k 4k 8k 16k Hz"/>
+                <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                    <ItemsControl x:Name="EqPanel"/>
+                </ScrollViewer>
+            </StackPanel>
+        </Border>
+
+        <!-- 环绕卡 -->
+        <Border Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="18">
+            <StackPanel>
+                <CheckBox x:Name="SurroundSwitch" Content="启用模拟 Hifi 环绕音效" FontWeight="SemiBold"
+                          Foreground="{DynamicResource TextPrimaryBrush}" Checked="SurroundSwitch_Checked" Unchecked="SurroundSwitch_Unchecked" Margin="0,0,0,10"/>
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="强度:" VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                    <Slider x:Name="SurroundStrengthSlider" Width="260" Minimum="0" Maximum="1"
+                            VerticalAlignment="Center" ValueChanged="SurroundStrengthSlider_ValueChanged"/>
+                    <TextBlock x:Name="StrengthValueText" VerticalAlignment="Center" FontSize="12" MinWidth="30"/>
+                </StackPanel>
+
+                <!-- 变体选择。四个变体是当初同一件事的四种做法：
+                     另外三套因为「有回声 / 有耳鸣」被换掉了，现在拿回来做 A/B 试听。
+                     听感反馈之前不要预设默认项。 -->
+                <TextBlock Text="算法变体（试听后选定）" FontSize="13" FontWeight="SemiBold" Margin="0,12,0,0"
+                           Foreground="{DynamicResource TextPrimaryBrush}"/>
+                <!-- StackPanel 而不是 ItemsControl：这个列表是代码里逐个
+                     new 出来的 RadioButton + 说明文字，ItemsControl 没 Children 可清，
+                     每次进页面重建时会重复叠加。 -->
+                <StackPanel x:Name="SurroundModePanel" Margin="0,6,0,0"/>
+
+                <!-- 这行说明必须跟着变体走。原来它写死成
+                     「Haas 双耳延迟 · 后环绕」，可实际生效的算法当时是同相加宽、
+                     根本没有延迟——用户按这段文字去听只会以为是自己听错了。 -->
+                <TextBlock x:Name="SurroundModeHintText" FontSize="11"
+                           Foreground="{DynamicResource TextTertiaryBrush}" TextWrapping="Wrap" Margin="0,8,0,0"/>
+            </StackPanel>
+        </Border>
+    </StackPanel>
+</UserControl>

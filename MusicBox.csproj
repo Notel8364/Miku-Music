@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <RootNamespace>MusicBox</RootNamespace>
+    <AssemblyName>MikuMusic</AssemblyName>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+
+    <!-- 版本号只写这一个地方。
+         <Version> 会同时填 AssemblyVersion / FileVersion / InformationalVersion，
+         而关于页读的就是 InformationalVersion，所以这里改一次三处都跟着变。
+         不写的话全默认 1.0.0，关于页就一直显示 v1.0.0。 -->
+    <Version>2.1.0</Version>
+
+    <!-- 调试构建不要被 2.1.0 这类正式版本号污染：
+         打开文件属性看到的还是「开发中」，免得拿一个 Debug 包当成发布版发出去。 -->
+    <Version Condition="'$(Configuration)' == 'Debug'">2.1.0-dev</Version>
+
+    <!-- 发布设置。PublishSingleFile 保持关闭：BBDown.exe 被标了
+         ExcludeFromSingleFile，塞进单文件会让下载器在运行时被解包到临时目录，
+         而它是要被单独启动的独立进程，解包路径每次运行都变。
+         老实发一个目录，压缩成一个 zip 更省事也更不容易出问题。 -->
+    <PublishSingleFile>false</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <SatelliteResourceLanguages>zh-Hans;zh-Hant;en;ru;ja;ko</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Assets\**">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Tools\BBDown.exe">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
+  </ItemGroup>
+
+</Project>
