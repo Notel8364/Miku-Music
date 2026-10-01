@@ -115,7 +115,7 @@ public static class LyricAnimTemplates
 		}
 		if (!string.IsNullOrWhiteSpace(folder))
 		{
-			foreach (LyricAnimTemplate t in LoadFolder(folder))
+			foreach (LyricAnimTemplate t in LoadFolderCached(folder))
 			{
 				if (string.Equals(t.Name, name, StringComparison.Ordinal))
 				{
@@ -132,9 +132,55 @@ public static class LyricAnimTemplates
 		var list = new List<LyricAnimTemplate>(BuiltIn);
 		if (!string.IsNullOrWhiteSpace(folder))
 		{
-			list.AddRange(LoadFolder(folder));
+			list.AddRange(LoadFolderCached(folder));
 		}
 		return list;
+	}
+
+	// 模板文件夹的读盘缓存。
+	//
+	// 为什么要缓存：Resolve 是歌词窗每次取 Anim 都要调的，而 Anim
+	// 在一句一切换里就被读好几次（ApplyHorizontal、SettleLineSelected、
+	// AnimateLineSelected……）。Resolve 原本每次都 LoadFolder 一遍，
+	// 那是一次完整的目录枚举 + 每个文件一次 File.ReadAllText。
+	// 用户一旦指了模板文件夹，就变成每句歌词都扫一次盘，
+	// 高频下足以让切句动画掉帧。
+	//
+	// 失效是显式的：设置页的「重新加载」按钮和换了文件夹路径都会调
+	// Invalidate()。代价是「在外部编辑器改完 json 不点重新加载就不生效」，
+	// 这是刻意换来的——界面上本来就有那个按钮。
+	private static readonly object _cacheGate = new();
+	private static string? _cacheFolder;
+	private static List<LyricAnimTemplate> _cacheList = new();
+
+	/// <summary>丢掉缓存，让下一次 Resolve/All 重新读盘。
+	/// 用户改了模板文件、或换了模板文件夹之后调用。</summary>
+	public static void Invalidate()
+	{
+		lock (_cacheGate)
+		{
+			_cacheFolder = null;
+			_cacheList = new List<LyricAnimTemplate>();
+		}
+	}
+
+	private static List<LyricAnimTemplate> LoadFolderCached(string? folder)
+	{
+		if (string.IsNullOrWhiteSpace(folder)) return new List<LyricAnimTemplate>();
+		lock (_cacheGate)
+		{
+			// 用 OrdinalIgnoreCase 比较：同一个文件夹大小写不同不该
+			// 触发重扫，但用户手写的路径分隔符差异交给下面兜底。
+			if (_cacheFolder != null
+				&& string.Equals(_cacheFolder, folder, StringComparison.OrdinalIgnoreCase))
+			{
+				return _cacheList;
+			}
+			List<LyricAnimTemplate> loaded = LoadFolder(folder);
+			_cacheFolder = folder;
+			_cacheList = loaded;
+			return loaded;
+		}
 	}
 
 	/// <summary>扫文件夹里顶层的 *.json，每个文件一套模板。

@@ -155,7 +155,9 @@ public partial class SettingsPage : UserControl, IMusicPage
 		var s = SettingsManager.Instance;
 		if (reloadFromDisk)
 		{
-			LyricAnimTemplates.LoadFolder(s.LyricAnimTemplateFolder);
+			// 丢缓存，让下面 All() 真的重新读盘。
+			// （原来这里是一次结果被丢掉的 LoadFolder 调用，纯浪费一次扫盘。）
+			LyricAnimTemplates.Invalidate();
 		}
 		List<LyricAnimTemplate> all = LyricAnimTemplates.All(s.LyricAnimTemplateFolder);
 
@@ -229,7 +231,7 @@ public partial class SettingsPage : UserControl, IMusicPage
 		if (hadCustom) s.LyricAnimTemplate = "";
 		SettingsManager.Save(s);
 
-		int n = LyricAnimTemplates.LoadFolder(picked).Count;
+		int n = LyricAnimTemplates.All(picked).Count - LyricAnimTemplates.BuiltIn.Length;
 		UpdateLyricAnimUI(reloadFromDisk: false);
 		LyricRuntime.RefreshAnimation();
 		// 结果直接写回那行说明文字：这里本来就在讲文件夹的事，
@@ -242,11 +244,13 @@ public partial class SettingsPage : UserControl, IMusicPage
 	private void LyricAnimReloadButton_Click(object sender, RoutedEventArgs e)
 	{
 		var s = SettingsManager.Instance;
-		// 重新加载 = 从磁盘再读一遍。Resolve 不缓存文件夹内容，
-		// 所以这里只要重新铺一遍下拉就会拿到新文件。
+		// 「重新加载」= 从磁盘再读一遍。Resolve 现在会缓存文件夹内容，
+		// 所以必须先 Invalidate，否则这里只是把同一份缓存重新铺一遍，
+		// 用户在外部改完 json 再点这个按钮不会有任何反应。
 		UpdateLyricAnimUI(reloadFromDisk: true);
 		LyricRuntime.RefreshAnimation();
-		int n = LyricAnimTemplates.LoadFolder(s.LyricAnimTemplateFolder).Count;
+		int n = LyricAnimTemplates.All(s.LyricAnimTemplateFolder).Count
+			- LyricAnimTemplates.BuiltIn.Length;
 		LyricAnimFolderHintText.Text = n > 0
 			? string.Format(Loc.Default["lyric_anim_folder_set"], s.LyricAnimTemplateFolder, n)
 			: Loc.Default["lyric_anim_folder_none"];

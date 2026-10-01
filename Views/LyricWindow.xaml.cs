@@ -55,6 +55,22 @@ public partial class LyricWindow : Window
 	/// 免得鼠标停在热区里时每一帧都重启一遍淡入动画。</summary>
 	private bool _barVisible;
 
+	/// <summary>穿透态下靠轮询光标位置来发现「鼠标扫进窗口了」。
+	///
+	/// 为什么不能等鼠标消息：穿透态里除了那几个按钮以外，整片歌词区在
+	/// WM_NCHITTEST 里回的是 HTTRANSPARENT，窗口压根收不到 WM_MOUSEMOVE，
+	/// OnHoverMove / DragBar.MouseEnter 这类挂窗口或挂元素的事件永远不来。
+	/// 之前的表现就是「开了穿透之后键位再也找不着」——不是没做淡入，
+	/// 是根本没机会知道鼠标来过。
+	///
+	/// GetCursorPos 是不经过任何命中测试的全局光标位置，轮询它就能做到
+	/// 「鼠标扫过歌词任意位置就点亮键位」，同时那一整片仍然点击穿透给
+	/// 下层窗口，两件事互不冲突。</summary>
+	private readonly DispatcherTimer _cursorWatchTimer = new()
+	{
+		Interval = TimeSpan.FromMilliseconds(60)
+	};
+
 	private HwndSource? _hwndSource;
 
 	private TranslateTransform? _horizBaseX;
@@ -125,6 +141,7 @@ public partial class LyricWindow : Window
 		};
 		_timer.Tick += OnTick;
 		_hideBarTimer.Tick += HideButtonBarTimer_Tick;
+		_cursorWatchTimer.Tick += CursorWatch_Tick;
 		_saveBoundsTimer.Tick += (_, _) => { _saveBoundsTimer.Stop(); SaveBounds(); };
 
 
@@ -889,9 +906,14 @@ public partial class LyricWindow : Window
 			SlideRowY(_prevShift, double.IsNaN(oldCur) ? newCur : oldCur, newPrev, dur, ease);
 			// 旧底格 → 新中间
 			SlideRowY(_curShift, double.IsNaN(oldNext) ? newNext : oldNext, newCur, dur, ease);
-			// 新底格：从下面一格外冒出来。间距取中间格和底格的距离，
-			// 拿不到就退回 40px。
-			double pitch = newCur - newNext;
+// 新底格：从下面一格外冒出来。间距取中间格和底格的距离，
+			// 拿不到就退 40px。
+			//
+			// 方向是「底格减去中格」：行定义自上而下是 prev(0)/cur(1)/next(2)，
+			// 所以 newNext 在 newCur 下面，这个差值是正的行高。
+			// 写成 newCur - newNext 会恒为负，被下面的 <=1 判据吃掉，
+			// 于是自定义行距永远走不到、每次都退化成 40px。
+			double pitch = newNext - newCur;
 			if (double.IsNaN(pitch) || pitch <= 1)
 			{
 				pitch = 40;
@@ -1553,6 +1575,7 @@ internal void ApplyPassthrough(bool on)
 		try
 		{
 			_hideBarTimer.Stop();
+			_cursorWatchTimer.Stop();
 			// ApplyPassthrough 每切一次开关就跑一遍，这里必须先摘再加，
 			// 否则 += 会把同一个处理器叠加上去（开穿透两次就触发两遍）。
 			DragBar.MouseEnter -= DragBar_MouseEnter;
@@ -1561,13 +1584,21 @@ internal void ApplyPassthrough(bool on)
 			if (!_passthrough)
 			{
 				DragBar.Opacity = 1.0;
+				// 非穿透态标题栏常驻，顺手把状态对齐，省得下一次开穿透
+				// 时 _barVisible 还留着 true 而跳过淡入。
+				_barVisible = true;
 				return;
 			}
 			DragBar.Opacity = 0.0;
+			_barVisible = false;
+			// 主路径是轮询：歌词整片都是穿透的，只有它能发现鼠标进来。
+			_cursorWatchTimer.Start();
 			// 用 DragBar 自己的 MouseEnter/MouseLeave，不靠窗口级 MouseMove。
 			// 穿透态下背景区是 HTTRANSPARENT，窗口根本收不到移动消息；
 			// 只有「被判成客户区」的控件才收得到。标题栏既然已经是热区，
 			// 直接在它身上挂事件最可靠，也不依赖 e.GetPosition(this) 的坐标换算。
+			// 留着它是为了零延迟：轮询最快也要等一个 60ms 的间隔，
+			// 而鼠标正好压在上沿那 30px 时不该有这种迟滞。
 			DragBar.MouseEnter += DragBar_MouseEnter;
 			DragBar.MouseLeave += DragBar_MouseLeave;
 			// 键盘/手柄触发的合成鼠标移动没有 MouseEnter，补一份兜底。
@@ -1577,6 +1608,68 @@ internal void ApplyPassthrough(bool on)
 		{
 			LogHelper.LogError(ex, "歌词窗标题栏淡入淡出失败");
 		}
+	}
+
+	/// <summary>轮询全局光标：进窗口就点亮键位，出窗口就开始收回倒计时。
+	///
+	/// 判定用 PointFromScreen 而不是窗口的 Left/Top/ActualWidth：
+	/// GetCursorPos 给的是物理像素，PointFromScreen 负责按当前 DPI 换算成
+	/// 窗口内的逻辑坐标，DPI 缩放和副屏负坐标都由它处理，比自己算稳妥。</summary>
+	private void CursorWatch_Tick(object? sender, EventArgs e)
+	{
+		if (!_passthrough || _closing || !IsLoaded || !IsVisible) return;
+		try
+		{
+			if (!TryGetCursorScreenPoint(out Point screen)) return;
+			// 先转成窗口内坐标：留一点余量，免得窗口边缘那一像素
+			// 因为取整被判成「在外面」，鼠标明明压着窗口键位却点不亮。
+			Point loc = PointFromScreen(screen);
+			bool inside = loc.X >= -2.0 && loc.Y >= -2.0
+				&& loc.X <= ActualWidth + 2.0 && loc.Y <= ActualHeight + 2.0;
+
+			if (inside)
+			{
+				// 鼠标还在窗口里：撤掉「收回」倒计时，别让它在用户
+				// 正准备去点按钮的时候把键位抽走。
+				_hideBarTimer.Stop();
+				ShowButtonBar();
+			}
+			else if (_barVisible)
+			{
+				// 离开窗口：给 1.6s 宽限再收，免得从歌词区移到键位
+				// 的那一下路上就把按钮弄没了。
+				_hideBarTimer.Stop();
+				_hideBarTimer.Start();
+			}
+		}
+		catch (Exception ex)
+		{
+			LogHelper.LogError(ex, "歌词窗光标轮询失败");
+			_cursorWatchTimer.Stop();
+		}
+	}
+
+	/// <summary>真正点亮键位（淡入）。已亮着就直接返回，
+	/// 免得每 60ms 重启一次动画。</summary>
+	private void ShowButtonBar()
+	{
+		if (!_passthrough || _closing) return;
+		try
+		{
+			if (_barVisible) return;
+			_barVisible = true;
+			DragBar.BeginAnimation(UIElement.OpacityProperty, null);
+			var ease = new System.Windows.Media.Animation.CubicEase
+			{
+				EasingMode = System.Windows.Media.Animation.EasingMode.EaseOut
+			};
+			// 淡入用 130ms：再慢就让人觉得「鼠标都过去了按钮才出现」，
+			// 反而不如不出现。
+			DragBar.BeginAnimation(UIElement.OpacityProperty,
+				new System.Windows.Media.Animation.DoubleAnimation(1.0,
+					new Duration(TimeSpan.FromMilliseconds(130))) { EasingFunction = ease });
+		}
+		catch { }
 	}
 
 	/// <summary>鼠标进入标题栏热区：淡入并开始「离开后隐藏」倒计时。</summary>
@@ -1602,33 +1695,21 @@ internal void ApplyPassthrough(bool on)
 		if (!_passthrough || _closing) return;
 		try
 		{
-			if (_barVisible) return;
-			_barVisible = true;
-			DragBar.BeginAnimation(UIElement.OpacityProperty, null);
-			var ease = new System.Windows.Media.Animation.CubicEase
-			{
-				EasingMode = System.Windows.Media.Animation.EasingMode.EaseOut
-			};
-			// 淡入用 130ms：再慢就让人觉得「鼠标都过去了按钮才出现」，
-			// 反而不如不出现。
-			DragBar.BeginAnimation(UIElement.OpacityProperty,
-				new System.Windows.Media.Animation.DoubleAnimation(1.0,
-					new Duration(TimeSpan.FromMilliseconds(130))) { EasingFunction = ease });
+			// 鼠标还在窗口里，所以撤掉「离开后隐藏」的倒计时。
+			// 少了这一步，倒计时会在用户正要去点按钮的路上把键位抽走。
 			_hideBarTimer.Stop();
-			_hideBarTimer.Start();
+			ShowButtonBar();
 		}
 		catch { }
 	}
 
 	private void OnHoverMove(object sender, MouseEventArgs e)
 	{
-		if (!_passthrough || _closing) return;
-		Point p = e.GetPosition(this);
-		bool near = p.Y <= 34.0;
-		if (near)
-		{
-			RevealButtonBar();
-		}
+		// 穿透态下这里只在「被判成客户区」的元素上才可能收到，
+		// 也就是那几条按钮区域；整片歌词靠 CursorWatch_Tick 兜。
+		// 所以这里不再按 Y 过滤：能收到就说明鼠标确实在本窗口的
+		// 可交互区域里，点亮是对的。
+		RevealButtonBar();
 	}
 
 	private void HideButtonBarTimer_Tick(object? sender, EventArgs e)
@@ -1888,6 +1969,35 @@ internal void ApplyPassthrough(bool on)
 	[DllImport("user32.dll")]
 	private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
+	[StructLayout(LayoutKind.Sequential)]
+	private struct NativePoint
+	{
+		public int X;
+		public int Y;
+	}
+
+	/// <summary>读全局光标位置（物理像素）。
+	///
+	/// 用 SetCursorPos 的老式 P/Invoke 而不是 System.Windows.Forms.Cursor：
+	/// 后者会把 WinForms 初始化链拖进来，而歌词窗不需要它。</summary>
+	[DllImport("user32.dll")]
+	private static extern bool GetCursorPos(out NativePoint lpPoint);
+
+	private static bool TryGetCursorScreenPoint(out Point screen)
+	{
+		try
+		{
+			if (GetCursorPos(out NativePoint p))
+			{
+				screen = new Point(p.X, p.Y);
+				return true;
+			}
+		}
+		catch { }
+		screen = default;
+		return false;
+	}
+
 
 	private void CloseButton_Click(object sender, RoutedEventArgs e)
 	{
@@ -1996,6 +2106,7 @@ internal void ApplyPassthrough(bool on)
 	{
 		StopAnimations();
 		_hideBarTimer.Stop();
+		_cursorWatchTimer.Stop();
 		_saveBoundsTimer.Stop();
 		// 窗口快没了还留着订阅没有必要，而且它们捕获着 this
 		MouseMove -= OnHoverMove;
