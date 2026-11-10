@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
 using System.Windows;
@@ -154,9 +156,10 @@ public partial class WebLoginWindow : Window
 						p?.WaitForExit();
 					}
 				}
-				catch
+				catch (Exception ex)
 				{
-					// 用户取消提权 / 启动失败：交给下方 InitAsync 的 catch 提示
+					// 用户取消提权 / 启动失败：交给下方 InitAsync 的 catch 提示。
+					LogHelper.LogDebug("启动 WebView2 安装器失败: " + ex.Message);
 				}
 			});
 
@@ -185,24 +188,93 @@ public partial class WebLoginWindow : Window
 		}
 	}
 
-	private void ExtractBtn_Click(object sender, RoutedEventArgs e)
+	private bool _extracting;
+
+	private async void ExtractBtn_Click(object sender, RoutedEventArgs e)
 	{
-		string cookie = QqClient.ReadSiteCookies(_cookieRoot);
-		if (string.IsNullOrWhiteSpace(cookie))
+		// 提取过程要连读 CookieManager，连点会重复弹两次结果框/关两次窗口。
+		if (_extracting)
 		{
-			MessageBox.Show("未获取到登录 Cookie。请确认已在窗口内完成登录后重试，或改用「手动粘贴 Cookie」。", _caption + " 登录", MessageBoxButton.OK, MessageBoxImage.Information);
 			return;
 		}
+		_extracting = true;
 		try
 		{
-			_onCookie(cookie);
-			MessageBox.Show("已提取并保存 " + _caption + " 登录 Cookie。", _caption + " 登录", MessageBoxButton.OK, MessageBoxImage.Information);
-			DialogResult = true;
-			Close();
+			// 优先走 WebView2 自己的 CookieManager（含 httpOnly，能拿到窗口内新登录的会话），
+			// 拿不到再退回 WinInet 读取系统窗口。
+			string? cookie = await ReadWebView2CookieAsync();
+			if (string.IsNullOrWhiteSpace(cookie))
+			{
+				cookie = QqClient.ReadSiteCookies(_cookieRoot);
+			}
+			if (string.IsNullOrWhiteSpace(cookie))
+			{
+				MessageBox.Show("未获取到登录 Cookie。请确认已在窗口内完成登录后重试，或改用「手动粘贴 Cookie」。", _caption + " 登录", MessageBoxButton.OK, MessageBoxImage.Information);
+				return;
+			}
+			try
+			{
+				_onCookie(cookie.Trim());
+				MessageBox.Show("已提取并保存 " + _caption + " 登录 Cookie。", _caption + " 登录", MessageBoxButton.OK, MessageBoxImage.Information);
+				DialogResult = true;
+				Close();
+			}
+			catch (Exception ex)
+			{
+				MessageBox.Show("保存失败：" + ex.Message, _caption + " 登录", MessageBoxButton.OK, MessageBoxImage.Error);
+			}
 		}
-		catch (Exception ex)
+		finally
 		{
-			MessageBox.Show("保存失败：" + ex.Message, _caption + " 登录", MessageBoxButton.OK, MessageBoxImage.Error);
+			_extracting = false;
+		}
+	}
+
+	/// <summary>经 WebView2 的 CookieManager 抓取本窗口内的会话 Cookie（含 httpOnly）。
+	/// 域名匹配规则同真实请求：目标是站内（含上级 .qq.com）的 Cookie 都会被带上。</summary>
+	private async Task<string?> ReadWebView2CookieAsync()
+	{
+		try
+		{
+			CoreWebView2? cwv = Web.CoreWebView2;
+			if (cwv == null)
+			{
+				return null;
+			}
+			var map = new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+			var uris = new List<string>();
+			if (Uri.TryCreate(_cookieRoot, UriKind.Absolute, out Uri? u))
+			{
+				uris.Add(u.GetLeftPart(UriPartial.Path));
+				string host = u.Host;
+				if (host != "qq.com" && host.EndsWith(".qq.com", StringComparison.OrdinalIgnoreCase))
+				{
+					uris.Add("https://qq.com/");
+				}
+			}
+			else
+			{
+				uris.Add(_cookieRoot);
+			}
+			foreach (string uri in uris)
+			{
+				foreach (CoreWebView2Cookie c in await cwv.CookieManager.GetCookiesAsync(uri))
+				{
+					if (!string.IsNullOrWhiteSpace(c.Name))
+					{
+						map[c.Name] = c.Value ?? "";
+					}
+				}
+			}
+			if (map.Count == 0)
+			{
+				return null;
+			}
+			return string.Join("; ", map.Select(kv => kv.Key + "=" + kv.Value));
+		}
+		catch
+		{
+			return null;
 		}
 	}
 }

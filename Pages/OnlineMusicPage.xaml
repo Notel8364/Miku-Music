@@ -1,4 +1,4 @@
-﻿<UserControl x:Class="MusicBox.Pages.OnlineMusicPage"
+<UserControl x:Class="MusicBox.Pages.OnlineMusicPage"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
@@ -28,13 +28,10 @@
 
         <Border Grid.Row="1" Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1">
             <Grid>
-                <!-- 左边音乐列表收窄，右边腾出常驻评论区。
-                     原来评论是盖在列表上的浮层，点不到（也就「打不开」），
-                     现在它是卡片右半边固定的一栏，不用点开就有位置。 -->
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
+                <!-- 单列铺满整张卡片。原来这里还有右半边的常驻评论分栏
+                     （CommentPanel，Width=340），按新需求整块搬成了
+                     MainWindow 里的第三界面（Views/CommentsPanel）：
+                     贴右缘的覆盖抽屉，不再挤占列表宽度。 -->
                 <Grid.RowDefinitions>
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
@@ -44,12 +41,22 @@
                               VerticalScrollBarVisibility="Auto" Padding="6,6,6,2"
                               CanContentScroll="False">
                     <ItemsControl x:Name="OnlineList" Background="Transparent">
-                        <ItemsControl.ItemsPanel>
-                            <!-- 固定用 StackPanel。行是代码 new 出来直接塞进
+                        <ItemsControl.Resources>
+                            <!-- 两套面板按源切换（RenderEngine 里赋值）：
+                                 行布局用 StackPanel（网易云/QQ/酷狗/汽水），
+                                 B站源用 WrapPanel 摆卡片网格。行是代码 new 出来直接塞进
                                  OnlineList.Items 的普通 Grid，本来就没有虚拟化；
                                  显式写死可以避免任何默认面板将来被换成
                                  VirtualizingStackPanel 而重演那次
                                  ApplyItemContainerStyle 崩溃。 -->
+                            <ItemsPanelTemplate x:Key="RowPanelTemplate">
+                                <StackPanel/>
+                            </ItemsPanelTemplate>
+                            <ItemsPanelTemplate x:Key="CardPanelTemplate">
+                                <WrapPanel Orientation="Horizontal" Margin="4"/>
+                            </ItemsPanelTemplate>
+                        </ItemsControl.Resources>
+                        <ItemsControl.ItemsPanel>
                             <ItemsPanelTemplate>
                                 <StackPanel/>
                             </ItemsPanelTemplate>
@@ -81,7 +88,7 @@
                            HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
 
                 <!-- B站视频源面板：VIP 受限时列出候选视频源，供用户挑选下载/播放。
-                     只盖左边的列表区，不再压住右边的评论区。 -->
+                     盖在列表区上方（评论已是右侧抽屉，不再和它抢位置）。 -->
                 <Border x:Name="BiliSourcePanel" Grid.RowSpan="2" Grid.Column="0" Background="{DynamicResource FlyoutBgBrush}" BorderBrush="{DynamicResource FlyoutBorderBrush}" BorderThickness="1"
                         CornerRadius="10" Margin="10" Visibility="Collapsed" MaxHeight="320"
                         HorizontalAlignment="Stretch" VerticalAlignment="Center">
@@ -113,102 +120,6 @@
                     </Grid>
                 </Border>
 
-                <!-- ============ 右侧常驻评论区 ============
-                     原来是盖在列表底部的浮层（MaxHeight 240 + Margin 10），
-                     视觉上像贴在列表里的一张小卡片，而且被列表内容压着不好点。
-                     现在它是卡片右半边固定一栏：左缘一条 1px 分隔线，
-                     任何时候都在，不会「打不开」。 -->
-                <Border x:Name="CommentPanel" Grid.RowSpan="2" Grid.Column="1" Width="340"
-                        Background="{DynamicResource CardBgSecondaryBrush}"
-                        BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1,0,0,0"
-                        CornerRadius="0,10,10,0">
-                    <Grid>
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="*"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                        </Grid.RowDefinitions>
-                        <!-- 标题行。原来这里还挂了一个「关闭/清除评论」按钮，
-                             看着像面板的关闭键，实际干的是「清空评论并收回空态」，
-                             和点同一首歌的评论键（重新加载）功能重叠，而且更容易误触。
-                             现在去掉：要看哪首歌的评论就点哪首的评论键，
-                             再点一次同一首则收起面板（见 OpenComments 里的 toggle）。
-                             底部 margin 保留 16，是为了让标题和列表右缘有分层，
-                             不然标题会紧贴最后一条评论。 -->
-                        <TextBlock x:Name="CommentHeaderText" Grid.Row="0" Margin="14,12,16,10"
-                                   FontSize="14" FontWeight="SemiBold"
-                                   Foreground="{DynamicResource TextPrimaryBrush}"
-                                   TextTrimming="CharacterEllipsis"
-                                   VerticalAlignment="Center"/>
-
-                        <!-- 登录提示独占一行。原来它和评论列表同在 Row=1，
-                             列表是后声明的所以盖在上面，视觉上就是
-                             「发表评论」这行字和评论内容糊在一起。 -->
-                        <TextBlock x:Name="CommentLoginHint" Grid.Row="1" VerticalAlignment="Top"
-                                   FontSize="12" Foreground="{DynamicResource TextTertiaryBrush}" Margin="14,0,14,8"
-                                   TextWrapping="Wrap" Visibility="Collapsed"/>
-
-                        <!-- 列表本体。默认是 Collapsed —— 「评论列表」由用户点评论按钮才展开，
-                             关闭后退回空态。原来 CommentScroll 常驻 Visible，
-                             拿 CommentPlaceholderText 盖在上面，等于列表区域一直占着，
-                             用户看到的就是「默认打开了」。 -->
-                        <Grid Grid.Row="2" x:Name="CommentBodyHost" Visibility="Collapsed">
-                            <ScrollViewer x:Name="CommentScroll" VerticalScrollBarVisibility="Auto" Padding="14,0,14,0"
-                                          ScrollChanged="CommentScroll_ScrollChanged">
-                                <StackPanel x:Name="CommentList"/>
-                            </ScrollViewer>
-                        </Grid>
-
-                        <!-- 空态。没点开评论时显示，撑住这一栏不至于一片空白。 -->
-                        <TextBlock x:Name="CommentPlaceholderText" Grid.Row="2" VerticalAlignment="Center"
-                                   HorizontalAlignment="Center"
-                                   TextWrapping="Wrap" TextAlignment="Center" MaxWidth="240" Margin="16"
-                                   FontSize="13" Foreground="{DynamicResource TextTertiaryBrush}"
-                                   Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[cm_pick_hint]}"/>
-
-                        <!-- 状态行独占一行。原来的评论条数（cm_count）已经不再显示：
-                             评论数对用户没有决策价值，还占掉了底部空间。
-                             这里只留加载中 / 出错 / 无评论 / 已到底。
-                             状态文字和「加载更多」提示共用这一行，
-                             由 SetCommentStatus 保证两者互斥，不会叠字。 -->
-                        <TextBlock x:Name="CommentStatusText" Grid.Row="3" VerticalAlignment="Center"
-                                   Margin="14,4,14,0" FontSize="12"
-                                   Foreground="{DynamicResource TextSecondaryBrush}" TextWrapping="Wrap"/>
-
-                        <!-- 触底提示。放在列表下面那一行，不浮在评论内容上面。 -->
-                        <TextBlock x:Name="CommentMoreHint" Grid.Row="3" VerticalAlignment="Center"
-                                   Margin="14,4,14,0" FontSize="11.5" Opacity="0.85"
-                                   Foreground="{DynamicResource TextTertiaryBrush}" Visibility="Collapsed"/>
-
-                        <!-- 底部发表评论输入框。默认显示（原来默认 Collapsed，
-                             于是「面板开着但没法发评论」看着像功能坏了）。
-                             能不能输入由 RefreshComposeState 按平台和登录态决定：
-                             支持的平台放开，否则保持禁用并在上面那行说明原因。 -->
-                        <Border x:Name="CommentComposeBar" Grid.Row="4" Margin="12,8,12,12"
-                                Background="{DynamicResource CardBgBrush}"
-                                BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1"
-                                CornerRadius="0">
-                            <Grid>
-                                <Grid.RowDefinitions>
-                                    <RowDefinition Height="Auto"/>
-                                    <RowDefinition Height="Auto"/>
-                                </Grid.RowDefinitions>
-                                <TextBox x:Name="CommentInputBox" Margin="10,8,10,0"
-                                         IsEnabled="False" AcceptsReturn="False" MaxLength="1000"
-                                         FontSize="13" BorderThickness="0" Background="Transparent"
-                                         Foreground="{DynamicResource TextPrimaryBrush}"
-                                         TextChanged="CommentInputBox_TextChanged" KeyDown="CommentInputBox_KeyDown"/>
-                                <Button x:Name="CommentSendButton" Grid.Row="1" Margin="10,6,10,8"
-                                        HorizontalAlignment="Right" Style="{StaticResource GhostButtonStyle}"
-                                        Padding="14,5" FontSize="12" IsEnabled="False"
-                                        Click="CommentSendButton_Click"
-                                        Content="{Binding Source={x:Static loc:Loc.Default}, Path=Item[cm_send]}"/>
-                            </Grid>
-                        </Border>
-                    </Grid>
-                </Border>
             </Grid>
         </Border>
 

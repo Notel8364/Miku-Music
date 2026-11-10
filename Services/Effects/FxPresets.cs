@@ -66,6 +66,15 @@ public sealed class FxPreset
 			surroundEnabled: true, surroundStrength: 1.0f,
 			widthEnabled: true, widthAmount: 1.05f),
 
+		// 「模拟Hifi环绕」按要求合并了 HIFI 基础 + B + D，并以 D 为主。
+		// 强度压到 0.85：三层都在加东西，1.0 时 outScale 只剩 0.84，
+		// 试听 D 时觉得「顶」，这里往下收一点。
+		new FxPreset("模拟Hifi环绕+回声主", "合并版：同相 HIFI 加宽打底 + B 的 Haas/后环绕压低当空间垫 + D 的 110ms 反馈回声当主角（湿声 45%）。",
+			new float[] { 0.5f, 0.5f, 0, 0, 0, 0, 0.5f, 0.5f, 0.5f, 0.5f },
+			surroundEnabled: true, surroundStrength: 0.85f,
+			surroundMode: SurroundMode.HifiMerged,
+			widthEnabled: true, widthAmount: 1.05f),
+
 		// ---- 环绕算法试听变体 ----
 		// 这四套是同一件事的四种做法，拆成独立预设是为了让用户直接 A/B 试听。
 		// 听感反馈之前不要把其中任何一套设成默认。

@@ -6,14 +6,17 @@
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         xmlns:loc="clr-namespace:MusicBox.Services"
         xmlns:local="clr-namespace:MusicBox"
+        xmlns:views="clr-namespace:MusicBox.Views"
         mc:Ignorable="d"
         Title="Miku Music"
         Width="1180" Height="760"
         MinWidth="960" MinHeight="620"
         WindowStartupLocation="CenterScreen"
+        Deactivated="Window_Deactivated"
         WindowStyle="None"
         Icon="Assets/app.ico"
-        Loaded="Window_Loaded" Closing="Window_Closing">
+        Loaded="Window_Loaded" Closing="Window_Closing" PreviewMouseLeftButtonDown="Window_PreviewMouseLeftButtonDown" PreviewKeyDown="Window_PreviewKeyDown"
+        LocationChanged="Window_LocationChanged" SizeChanged="Window_LocationChanged">
     <shell:WindowChrome.WindowChrome>
         <shell:WindowChrome CaptionHeight="34" ResizeBorderThickness="6"
                             GlassFrameThickness="0" CornerRadius="10"
@@ -36,42 +39,103 @@
             <Border Background="Transparent"/>
         </ControlTemplate>
         <ControlTemplate x:Key="SliderFillTemplate" TargetType="RepeatButton">
-            <Border Background="{DynamicResource AccentBrush}" CornerRadius="4" Height="7" VerticalAlignment="Center"/>
+            <!-- 外层 Grid 撑满透明命中区：填充块只有 5px 视觉高，
+                 但 RepeatButton 的可点矩形必须是整条轨道高，
+                 否则点左右两半时就只剩中间细线能点（「点击范围不准/无响应」）。 -->
+            <Grid Background="Transparent">
+                <Border Background="{DynamicResource AccentBrush}" CornerRadius="2" Height="5" VerticalAlignment="Center"/>
+            </Grid>
         </ControlTemplate>
+        <!-- 音量浮层横滑条的填充块：4px 细线，和 4px 底轨严格同高，
+             视觉上不会出现「填充比底轨粗一圈」的台阶。 -->
+        <ControlTemplate x:Key="SliderFillThinTemplate" TargetType="RepeatButton">
+            <Grid Background="Transparent">
+                <Border Background="{DynamicResource AccentBrush}" CornerRadius="2" Height="4" VerticalAlignment="Center"/>
+            </Grid>
+        </ControlTemplate>
+        <!-- 进度条（时长条）的拖动头：细滑轨配个小圆点，悬停/拖动时给点反馈，
+             比旧版那个死板的 16px 白圆更「跟手」。
+             注意：Setter.TargetName 只能指向 FrameworkElement，
+             指向 ScaleTransform 这种 Freezable 会报 MC4111，所以反馈做在圆点自身的
+             填充/描边上，而不是缩放。 -->
         <ControlTemplate x:Key="SliderThumbTemplate" TargetType="Thumb">
-            <Ellipse x:Name="Dot" Fill="#FFFFFF" Stroke="{DynamicResource AccentBrush}" StrokeThickness="2"/>
+            <Grid>
+                <Ellipse x:Name="Dot" Fill="#FFFFFF" Stroke="{DynamicResource AccentBrush}" StrokeThickness="2"
+                         HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Grid>
+            <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter TargetName="Dot" Property="Fill" Value="{DynamicResource AccentBrush}"/>
+                </Trigger>
+                <Trigger Property="IsDragging" Value="True">
+                    <Setter TargetName="Dot" Property="StrokeThickness" Value="3"/>
+                </Trigger>
+            </ControlTemplate.Triggers>
         </ControlTemplate>
 
         <Style x:Key="AccentSlider" TargetType="Slider">
-            <!-- 轨道做粗一点：现在 4px 细线在深色背景上几乎点不中，
-                 用户反馈「跳转选不中有点难受」。Slider 本身 28px 高，
-                 Track 撑满，命中区其实一直是 28px，这里把可视轨道加粗到 7px
-                 让「能点到的范围」和「看起来能点」一致。 -->
+            <!-- 可视轨道收细到 5px（旧版 7px 在深色底上显粗，和「时长条」的身份不符），
+                 命中区仍交给 Track 撑满的 Slider 高度，不牺牲点选范围。
+                 拖动头由 SliderThumbTemplate 自己控制大小。 -->
             <Setter Property="Height" Value="30"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Slider">
                         <Grid VerticalAlignment="Center">
-                            <Border Height="7" CornerRadius="4" Background="{DynamicResource SubtleFillHoverBrush}" VerticalAlignment="Center"/>
+                            <Border Height="5" CornerRadius="2" Background="{DynamicResource SubtleFillHoverBrush}" VerticalAlignment="Center" Opacity="0.9"/>
                             <!-- Track 撑满整个 Slider 高度：只是扩大鼠标命中区域，
                                  里面的填充块/滑块仍各自 VerticalAlignment=Center 居中。 -->
-                            <Track x:Name="PART_Track" Height="30" VerticalAlignment="Center">
-                                <!-- IsHitTestVisible=False 至关重要：RepeatButton 默认会吃掉鼠标按下
-                                     （Slider.IncreaseLarge 没有 CommandParameter 时直接返回 false），
-                                     导致 Track 收不到点击、IsMoveToPointEnabled 永远不执行，
-                                     表现就是「点轨道没反应 / 点了又弹回去」。 -->
+                                <Track x:Name="PART_Track" Height="30" VerticalAlignment="Center">
+                                    <!-- RepeatButton 保持可命中（别再挂 IsHitTestVisible=False），
+                                         但绝对不挂 Decrease/Increase 命令：长按会把
+                                         RepeatButton 当按钮一直触发 LargeChange
+                                         （0~1 的范围一步干脆跳到 0/1，就是「长按回弹」）。
+                                         命中区现在只为 Slider 的 IsMoveToPointEnabled
+                                         提供整条高可点的左右两半，跳到点击处由
+                                         MoveToPoint 的预览按下统一完成。 -->
+                                    <Track.DecreaseRepeatButton>
+                                        <RepeatButton IsTabStop="False" Focusable="False"
+                                                      Template="{StaticResource SliderFillTemplate}"/>
+                                    </Track.DecreaseRepeatButton>
+                                    <Track.IncreaseRepeatButton>
+                                        <RepeatButton IsTabStop="False" Focusable="False"
+                                                      Template="{StaticResource RepeatBtnTemplate}"/>
+                                    </Track.IncreaseRepeatButton>
+                                <Track.Thumb>
+                                    <Thumb Width="12" Height="12"
+                                           Template="{StaticResource SliderThumbTemplate}"/>
+                                </Track.Thumb>
+                            </Track>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- 音量浮层用的横滑条：4px 轨道 + 12px 圆头，和底栏时长条同一套语汇。
+             原来的竖条只有 18px 宽、150px 高，鼠标稍微歪一点就出界，
+             改成横条以后一行放得下「图标 + 标签 + 滑条 + 百分比」，
+             主音量和视频背景音量两条并排，不用再开第二个入口。 -->
+        <Style x:Key="FlyoutHSlider" TargetType="Slider">
+            <Setter Property="Height" Value="22"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Slider">
+                        <Grid Background="Transparent" VerticalAlignment="Center">
+                            <Border Height="4" CornerRadius="2" Background="{DynamicResource SubtleFillHoverBrush}"
+                                    VerticalAlignment="Center" Opacity="0.9"/>
+                            <Track x:Name="PART_Track" Height="22" VerticalAlignment="Center">
                                 <Track.DecreaseRepeatButton>
-                                    <RepeatButton Command="Slider.DecreaseLarge" IsTabStop="False" Focusable="False"
-                                                  IsHitTestVisible="False"
-                                                  Template="{StaticResource SliderFillTemplate}"/>
+                                    <RepeatButton IsTabStop="False" Focusable="False" IsHitTestVisible="False"
+                                                  Template="{StaticResource SliderFillThinTemplate}"/>
                                 </Track.DecreaseRepeatButton>
                                 <Track.IncreaseRepeatButton>
-                                    <RepeatButton Command="Slider.IncreaseLarge" IsTabStop="False" Focusable="False"
-                                                  IsHitTestVisible="False"
+                                    <RepeatButton IsTabStop="False" Focusable="False" IsHitTestVisible="False"
                                                   Template="{StaticResource RepeatBtnTemplate}"/>
                                 </Track.IncreaseRepeatButton>
                                 <Track.Thumb>
-                                    <Thumb Width="16" Height="16" Background="White"
+                                    <Thumb Width="12" Height="12"
                                            Template="{StaticResource SliderThumbTemplate}"/>
                                 </Track.Thumb>
                             </Track>
@@ -82,8 +146,13 @@
         </Style>
 
         <!-- 圆形图标按钮：迷你播放器主控。
-             悬停/按下不再靠 Trigger 硬切背景色（那样是「啪」一下跳变），
-             而是在底层铺一个淡色层 Bd，用 DoubleAnimation 把 Opacity 淡入淡出。 -->
+             悬停/按下用 Trigger 硬切背景色。原先这里用 EventTrigger + DoubleAnimation 做渐变，
+             但 EventTrigger 不能和属性 Trigger 混在同一个 ControlTemplate.Triggers 里：
+             模板走 XamlReader 回退路径加载时，触发器会被挂到模板根元素的 Triggers 上，
+             由 EventTrigger 统一处理，混着属性 Trigger 就会抛
+             "Triggers 集合成员必须是类型 EventTrigger"（见 Logs 里的 XamlParseException），
+             而且只在 ApplyTemplate 时才炸，编译和 XAML 解析都过得去。
+             同样的坑 Pages\AccountPage.xaml 的 LoginCardHeaderStyle 已经踩过一次。 -->
         <Style x:Key="RoundIconButton" TargetType="Button">
             <Setter Property="Width" Value="34"/>
             <Setter Property="Height" Value="34"/>
@@ -97,37 +166,16 @@
                         <Border Background="{TemplateBinding Background}" CornerRadius="8"
                                 BorderThickness="0">
                             <Grid>
-                                <!-- 淡化层：默认全透明，悬停时淡入 -->
+                                <!-- 悬停淡化层：默认全透明，悬停时直接显示（动画已按要求去掉，理由见上面） -->
                                 <Border x:Name="Bd" Background="{DynamicResource ControlFillHoverBrush}"
                                         CornerRadius="8" Opacity="0"/>
                                 <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
                             </Grid>
                         </Border>
                         <ControlTemplate.Triggers>
-                            <EventTrigger RoutedEvent="MouseEnter" SourceName="Bd">
-                                <BeginStoryboard>
-                                    <Storyboard>
-                                        <DoubleAnimation Storyboard.TargetName="Bd" Storyboard.TargetProperty="Opacity"
-                                                         To="1" Duration="0:0:0.12">
-                                            <DoubleAnimation.EasingFunction>
-                                                <QuadraticEase EasingMode="EaseOut"/>
-                                            </DoubleAnimation.EasingFunction>
-                                        </DoubleAnimation>
-                                    </Storyboard>
-                                </BeginStoryboard>
-                            </EventTrigger>
-                            <EventTrigger RoutedEvent="MouseLeave" SourceName="Bd">
-                                <BeginStoryboard>
-                                    <Storyboard>
-                                        <DoubleAnimation Storyboard.TargetName="Bd" Storyboard.TargetProperty="Opacity"
-                                                         To="0" Duration="0:0:0.16">
-                                            <DoubleAnimation.EasingFunction>
-                                                <QuadraticEase EasingMode="EaseOut"/>
-                                            </DoubleAnimation.EasingFunction>
-                                        </DoubleAnimation>
-                                    </Storyboard>
-                                </BeginStoryboard>
-                            </EventTrigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Opacity" Value="1"/>
+                            </Trigger>
                             <Trigger Property="IsPressed" Value="True">
                                 <Setter TargetName="Bd" Property="Background" Value="{DynamicResource ControlFillPressedBrush}"/>
                             </Trigger>
@@ -286,7 +334,7 @@
                     <ControlTemplate TargetType="ListBoxItem">
                         <Border x:Name="Bd" Background="Transparent" CornerRadius="0">
                             <Grid>
-                                <!-- 悬停淡化层：默认透明，MouseEnter 淡入 -->
+                                <!-- 悬停淡化层：默认透明，悬停时由 Trigger 直接显示（动画已按要求去掉） -->
                                 <Border x:Name="HoverLayer" Background="{DynamicResource SubtleFillHoverBrush}"
                                         CornerRadius="0" Opacity="0"
                                         RenderOptions.EdgeMode="Aliased"/>
@@ -304,33 +352,12 @@
                             </Grid>
                         </Border>
                         <ControlTemplate.Triggers>
-                            <!-- 悬停：淡化层淡入（缩放动画已按要求去掉） -->
-                            <EventTrigger RoutedEvent="MouseEnter" SourceName="Bd">
-                                <BeginStoryboard>
-                                    <Storyboard>
-                                        <DoubleAnimation Storyboard.TargetName="HoverLayer"
-                                                         Storyboard.TargetProperty="Opacity"
-                                                         To="1" Duration="0:0:0.12">
-                                            <DoubleAnimation.EasingFunction>
-                                                <QuadraticEase EasingMode="EaseOut"/>
-                                            </DoubleAnimation.EasingFunction>
-                                        </DoubleAnimation>
-                                    </Storyboard>
-                                </BeginStoryboard>
-                            </EventTrigger>
-                            <EventTrigger RoutedEvent="MouseLeave" SourceName="Bd">
-                                <BeginStoryboard>
-                                    <Storyboard>
-                                        <DoubleAnimation Storyboard.TargetName="HoverLayer"
-                                                         Storyboard.TargetProperty="Opacity"
-                                                         To="0" Duration="0:0:0.16">
-                                            <DoubleAnimation.EasingFunction>
-                                                <QuadraticEase EasingMode="EaseOut"/>
-                                            </DoubleAnimation.EasingFunction>
-                                        </DoubleAnimation>
-                                    </Storyboard>
-                                </BeginStoryboard>
-                            </EventTrigger>
+                            <!-- 悬停：淡化层直接显示，不再用 EventTrigger 做渐变。
+                                 EventTrigger 和属性 Trigger 不能混在同一个 ControlTemplate.Triggers 里，
+                                 会抛 "Triggers 集合成员必须是类型 EventTrigger"（理由见 RoundIconButton）。 -->
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="HoverLayer" Property="Opacity" Value="1"/>
+                            </Trigger>
                             <Trigger Property="IsSelected" Value="True">
                                 <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
                                 <Setter Property="FontWeight" Value="SemiBold"/>
@@ -439,7 +466,9 @@
                     </Image>
                     <MediaElement x:Name="BgVideo" Stretch="UniformToFill"
                                   LoadedBehavior="Manual" UnloadedBehavior="Manual"
-                                  MediaEnded="BgVideo_MediaEnded" Visibility="Collapsed" Opacity="0"/>
+                                  MediaOpened="BgVideo_MediaOpened"
+                                  MediaEnded="BgVideo_MediaEnded" Visibility="Collapsed" Opacity="0"
+                                  RenderOptions.BitmapScalingMode="LowQuality"/>
                     <!-- 背景压暗层：对应设置里的「背景暗度」 -->
                     <Border x:Name="BgDark" Background="#5E0F0F0F"/>
                     <!-- 卡片蒙版：对应 MhyunBox 的 ContentCard.Background。
@@ -470,17 +499,80 @@
                             Padding="12,7">
                         <Grid>
                             <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="Auto"/>
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
 
+                            <!-- 最左：封面方块。有封面（在线歌的平台图 / 本地匹配到的
+                                 网易云封面）就铺满显示；没有就退回一个手绘的音符图标，
+                                 不留下空洞的方块。手绘而不是用 Segoe MDL2 的字形：
+                                 那个码位在不同系统上形状不一致（有的是带文件夹的
+                                 「音乐收藏」），画一个双音符最稳。
+                                 双击等同双击曲名区：进沉浸播放页。 -->
+                            <!-- 外层不裁剪（Grid 本来就不裁）：来源框的阴影光晕
+                                 要能溢到方块外面去，才有「发光」的样子。
+                                 裁圆角的那层是里面的 MiniCoverBox，只管图片。 -->
+                            <Grid x:Name="MiniCoverWrap" Grid.Column="0" Width="55" Height="55"
+                                  VerticalAlignment="Center" Margin="0,0,12,0"
+                                  Cursor="Hand">
+                                <Grid.ToolTip>
+                                    <TextBlock x:Name="MiniCoverTip" Text="封面"/>
+                                </Grid.ToolTip>
+                                <!-- 封面方块：接近直角的 2px 圆角（用户要求锐角观感），
+                                     底色不透明占位（SubtleFillHoverBrush），图没到也不穿帮。 -->
+                                <Border x:Name="MiniCoverBox" CornerRadius="2" ClipToBounds="True"
+                                        Background="{DynamicResource SubtleFillHoverBrush}"
+                                        BorderBrush="{DynamicResource ControlStrokeBrush}" BorderThickness="1">
+                                <Grid>
+                                    <Image x:Name="MiniCoverImage" Stretch="UniformToFill" Opacity="0"/>
+                                    <!-- 无封面时的音符占位图（随方块 44→55 同步放大） -->
+                                    <Viewbox x:Name="MiniCoverGlyph" Width="30" Height="30"
+                                             HorizontalAlignment="Center" VerticalAlignment="Center">
+                                        <Canvas Width="24" Height="24">
+                                            <!-- 两个符头（斜切 20° 才像音符，正圆像糖葫芦） -->
+                                            <Ellipse Canvas.Left="2.6" Canvas.Top="15.4" Width="7.2" Height="5.6"
+                                                     Fill="{DynamicResource TextTertiaryBrush}" RenderTransformOrigin="0.5,0.5">
+                                                <Ellipse.RenderTransform>
+                                                    <RotateTransform Angle="-20"/>
+                                                </Ellipse.RenderTransform>
+                                            </Ellipse>
+                                            <Ellipse Canvas.Left="13.4" Canvas.Top="15.4" Width="7.2" Height="5.6"
+                                                     Fill="{DynamicResource TextTertiaryBrush}" RenderTransformOrigin="0.5,0.5">
+                                                <Ellipse.RenderTransform>
+                                                    <RotateTransform Angle="-20"/>
+                                                </Ellipse.RenderTransform>
+                                            </Ellipse>
+                                            <!-- 两根符干 -->
+                                            <Rectangle Canvas.Left="8.1" Canvas.Top="5.6" Width="1.7" Height="11.2"
+                                                       Fill="{DynamicResource TextTertiaryBrush}"/>
+                                            <Rectangle Canvas.Left="19.0" Canvas.Top="5.6" Width="1.7" Height="11.2"
+                                                       Fill="{DynamicResource TextTertiaryBrush}"/>
+                                            <!-- 符杠：把两根符干顶端连起来 -->
+                                            <Rectangle Canvas.Left="8.1" Canvas.Top="5.6" Width="12.6" Height="2.6"
+                                                       Fill="{DynamicResource TextTertiaryBrush}"/>
+                                        </Canvas>
+                                    </Viewbox>
+                                </Grid>
+                                </Border>
+
+                            </Grid>
+
                             <!-- 左：曲目名 / 进度（设置入口已移到左下角导航，这里只留播放信息） -->
-                            <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="2,0,18,0">
-                                <DockPanel Margin="0,0,0,2">
-                                    <TextBlock x:Name="MiniTimeText" DockPanel.Dock="Right" MinWidth="122"
-                                               FontSize="12.5" Foreground="{DynamicResource TextTertiaryBrush}" Margin="10,0,0,0"
-                                               VerticalAlignment="Center" TextAlignment="Right" Text="00:00 / 00:00"/>
+                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,18,0">
+                                <DockPanel x:Name="MiniTitleDock" Margin="0,0,0,2">
+                                    <!-- 时间 + 平台来源两行靠右：来源行（来自 XX 平台）
+                                         在时长正下方，10.5px 次级色、右对齐同列。
+                                         没有可识别平台时整行收起，不留空行。 -->
+                                    <StackPanel x:Name="MiniTimePanel" DockPanel.Dock="Right" VerticalAlignment="Center" Margin="10,0,0,0">
+                                        <TextBlock x:Name="MiniTimeText" MinWidth="122"
+                                                   FontSize="12.5" Foreground="{DynamicResource TextTertiaryBrush}"
+                                                   VerticalAlignment="Center" TextAlignment="Right" Text="00:00 / 00:00"/>
+                                        <TextBlock x:Name="MiniSourceText" MinWidth="122" FontSize="10.5"
+                                                   Foreground="{DynamicResource TextTertiaryBrush}"
+                                                   TextAlignment="Right" Text="" Visibility="Collapsed" Margin="0,1,0,0"/>
+                                    </StackPanel>
                                     <!-- 取流/下载提示。点在线歌曲后要等直链和下载，
                                          常常好几秒到几十秒（VIP 更久），
                                          原来这段时间标题栏完全没变化，像卡死，
@@ -504,25 +596,78 @@
                                                        VerticalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="180"/>
                                         </StackPanel>
                                     </Border>
-                                    <TextBlock x:Name="MiniTrackText" FontSize="14.5" FontWeight="SemiBold"
-                                               Foreground="{DynamicResource TextPrimaryBrush}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                                    <!-- 曲名一行 + 歌手一行：歌手由 UpdateMiniTrack 填，
+                                         拿不到就整行收起，只留曲名。改名铅笔的行内编辑
+                                         仍然盯 MiniTrackText，所以名字保留不动。
+                                         曲名与复制键同处一个水平面板：键紧贴曲名尾部
+                                         （左间距 8px），曲名超长时按代码钳制的 MaxWidth
+                                         截断（见构造函数里 MiniTitleRow.SizeChanged），
+                                         复制键跟在省略号后面，末尾恒留 12px 不挤时间区。 -->
+                                    <StackPanel VerticalAlignment="Center">
+                                        <StackPanel x:Name="MiniTitleRow" Orientation="Horizontal" VerticalAlignment="Center">
+                                            <!-- 裁剪容器：走马灯开启时两个文本副本同步左移
+                                                 （MiniTitleShift / MiniTitleShift2），超出容器的
+                                                 部分被这里裁掉。副本 2 恒在主文本后方一个周期处
+                                                 （自然宽+裁剪窗宽），位移回卷后副本 2 恰好补到主
+                                                 文本原位，画面逐像素一致、看不到接缝。效果上：
+                                                 尾部走出左缘的那一刻，头部副本恰好从右缘冒出，
+                                                 两份文本之间隔着整窗宽的空白。容器宽度 =
+                                                 标题钳制后的 MaxWidth（ClampMiniTitle 里钳在两个
+                                                 副本上，Grid 按内容宽度收缩），与不滚动时的占位
+                                                 完全一致，复制键位置不跳。 -->
+                                            <Grid x:Name="MiniTitleClip" ClipToBounds="True" VerticalAlignment="Center">
+                                                <TextBlock x:Name="MiniTrackText" FontSize="14.5" FontWeight="SemiBold"
+                                                           Foreground="{DynamicResource TextPrimaryBrush}" TextTrimming="CharacterEllipsis"
+                                                           VerticalAlignment="Center">
+                                                    <TextBlock.RenderTransform>
+                                                        <TranslateTransform x:Name="MiniTitleShift" X="0"/>
+                                                    </TextBlock.RenderTransform>
+                                                </TextBlock>
+                                                <TextBlock x:Name="MiniTrackText2" FontSize="14.5" FontWeight="SemiBold"
+                                                           Foreground="{DynamicResource TextPrimaryBrush}" TextTrimming="CharacterEllipsis"
+                                                           VerticalAlignment="Center" Visibility="Collapsed" IsHitTestVisible="False">
+                                                    <TextBlock.RenderTransform>
+                                                        <TranslateTransform x:Name="MiniTitleShift2" X="0"/>
+                                                    </TextBlock.RenderTransform>
+                                                </TextBlock>
+                                            </Grid>
+                                            <Button x:Name="MiniCopyButton" Style="{StaticResource SmallRoundButton}"
+                                                    Margin="8,0,0,0" VerticalAlignment="Center" Visibility="Collapsed"
+                                                    Click="MiniCopyButton_Click"
+                                                    ToolTip="{Binding Source={x:Static loc:Loc.Default}, Path=Item[mt_copy]}">
+                                                <TextBlock Text="&#xE8C8;" FontFamily="Segoe MDL2 Assets" FontSize="12.5"
+                                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                            </Button>
+                                        </StackPanel>
+                                        <TextBlock x:Name="MiniArtistText" FontSize="11.5" Margin="0,1,0,0"
+                                                   Foreground="{DynamicResource TextTertiaryBrush}" TextTrimming="CharacterEllipsis"
+                                                   Visibility="Collapsed"/>
+                                    </StackPanel>
                                 </DockPanel>
-                                <!-- 进度条：IsMoveToPointEnabled 让点击轨道任意位置直接跳过去；
-                                     拖动完全交给 Slider 自己的 Thumb 逻辑处理。
-                                     之前在 PreviewMouseLeftButtonDown 里 e.Handled=true 把事件吃掉了，
-                                     Thumb 从来没拿到鼠标，鼠标一拖出轨道就收不到事件 → 卡住没反应。 -->
-                                <Slider x:Name="MiniProgressSlider" Style="{StaticResource AccentSlider}"
-                                        Height="18" Minimum="0" Maximum="1" Value="0"
-                                        IsMoveToPointEnabled="True"
-                                        PreviewMouseLeftButtonDown="MiniProgressSlider_PreviewMouseLeftButtonDown"
-                                        PreviewMouseLeftButtonUp="MiniProgressSlider_PreviewMouseLeftButtonUp"
-                                        LostMouseCapture="MiniProgressSlider_LostMouseCapture"
-                                        ValueChanged="MiniProgressSlider_ValueChanged"/>
+                                <!-- 进度条：按下即捕获鼠标由代码接管：
+                                     按下→值跟落点（只改 UI）；拖动→跟手并实时
+                                     预览时间；松手→才在松开处定位，拖动全程不打断播放。
+                                     按住期间绝不中途 Seek（那是「长按再拖不顺」的根源）。 -->
+                                <Grid Height="18" Margin="0,5,0,0">
+                                    <Slider x:Name="MiniProgressSlider" Style="{StaticResource AccentSlider}"
+                                            Height="18" Minimum="0" Maximum="1" Value="0"
+                                            IsMoveToPointEnabled="True"
+                                            PreviewMouseLeftButtonDown="MiniProgressSlider_PreviewMouseLeftButtonDown"
+                                            PreviewMouseMove="MiniProgressSlider_PreviewMouseMove"
+                                            PreviewMouseLeftButtonUp="MiniProgressSlider_PreviewMouseLeftButtonUp"
+                                            LostMouseCapture="MiniProgressSlider_LostMouseCapture"
+                                            ValueChanged="MiniProgressSlider_ValueChanged"/>
+                                    <Ellipse x:Name="MiniProgressMarker" Width="9" Height="9"
+                                             Fill="{DynamicResource AccentBrush}"
+                                             Stroke="{DynamicResource CardBgBrush}" StrokeThickness="1.5"
+                                             HorizontalAlignment="Left" VerticalAlignment="Center"
+                                             Margin="4,0,0,0" Opacity="0" IsHitTestVisible="False"/>
+                                </Grid>
                             </StackPanel>
 
                             <!-- 中：上一首 / 播放暂停 / 下一首。三个键贴在一起，尺寸一致（34px），
                                  播放键只用强调色区分，不再是 58px 的大圆。 -->
-                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                            <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
                                 <Button x:Name="MiniPrevButton" Style="{StaticResource RoundIconButton}" Click="MiniPrevButton_Click"
                                         ToolTip="{Binding Source={x:Static loc:Loc.Default}, Path=Item[mt_prev]}">
                                     <TextBlock Text="&#xE892;" FontFamily="Segoe MDL2 Assets" FontSize="16" HorizontalAlignment="Center" VerticalAlignment="Center"/>
@@ -539,100 +684,183 @@
                                 </Button>
                             </StackPanel>
 
-                            <!-- 右：收藏 / 播放模式 / 音量 / 音效 / 最近播放 -->
-                            <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="18,0,2,0">
+                            <!-- 右：收藏 / 播放模式 / 音量 / 评论 / 桌面歌词 / 更多（悬停浮现：更名 / 音效） -->
+                            <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center" Margin="18,0,2,0">
                                 <Button x:Name="MiniFavButton" Style="{StaticResource SmallRoundButton}" Click="MiniFavButton_Click"
-                                        ToolTip="{Binding Source={x:Static loc:Loc.Default}, Path=Item[mt_fav]}">
+                                        ToolTip="{Binding Source={x:Static loc:Loc.Default}, Path=Item[mt_fav]}"
+                                        Margin="4,0,0,0">
                                     <TextBlock x:Name="MiniFavGlyph" Text="&#xEB51;" FontFamily="Segoe MDL2 Assets" FontSize="15" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                 </Button>
 
-                                <!-- 播放顺序（随机/列表循环/单曲循环，点击循环切换） -->
-                                <Button x:Name="MiniOrderButton" Margin="4,0,0,0" Style="{StaticResource SmallRoundButton}"
-                                        Click="MiniOrderButton_Click"
-                                        ToolTip="{Binding Source={x:Static loc:Loc.Default}, Path=Item[mt_mode]}">
-                                    <TextBlock x:Name="MiniOrderGlyph" Text="&#xE8B1;" FontFamily="Segoe MDL2 Assets" FontSize="15"
-                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                </Button>
+                                <!-- 播放顺序（随机/列表循环/单曲循环，点击循环切换；
+                                     右键弹出模式列表，样式与「更多」浮层同款） -->
+                                <Border x:Name="MiniOrderWrap" Margin="4,0,0,0" VerticalAlignment="Center">
+                                    <Button x:Name="MiniOrderButton" Style="{StaticResource SmallRoundButton}"
+                                            Click="MiniOrderButton_Click"
+                                            MouseRightButtonUp="MiniOrderButton_RightClick"
+                                            ToolTip="{Binding Source={x:Static loc:Loc.Default}, Path=Item[mt_mode]}">
+                                        <TextBlock x:Name="MiniOrderGlyph" Text="&#xE8B1;" FontFamily="Segoe MDL2 Assets" FontSize="15"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Button>
+                                </Border>
+                                <!-- 播放模式列表浮层：右键播放顺序键弹出，四种模式全列，
+                                     当前模式打勾。样式照搬「更多」浮层（FlyoutBg 圆角卡 +
+                                     图标文字项），条目在每次弹出时代码重建（勾选才新鲜）。
+                                     放置方向在代码里按「向内打开」计算（右缘对齐锚、整体在上）。 -->
+                                <Popup x:Name="MiniOrderPopup" StaysOpen="False" AllowsTransparency="True"
+                                       Placement="Top" PlacementTarget="{Binding ElementName=MiniOrderWrap}"
+                                       PopupAnimation="Fade" VerticalOffset="-6">
+                                    <Border Background="{DynamicResource FlyoutBgBrush}"
+                                            BorderBrush="{DynamicResource FlyoutBorderBrush}" BorderThickness="1"
+                                            CornerRadius="8" MinWidth="168" Padding="4,4">
+                                        <StackPanel x:Name="MiniOrderList"/>
+                                    </Border>
+                                </Popup>
 
-                                <!-- 音量（点击向上弹垂直滑条：下低上高，可点选定位） -->
+                                <!-- 音量（点击向上弹音量浮层：主音量一条）。
+                                     支持按住任意位置拖动：按下即按落点取值，
+                                     再随指针一路跟随，松手才落盘；滚轮也能调。 -->
                                 <Grid VerticalAlignment="Center" Margin="4,0,0,0">
                                     <Button x:Name="MiniVolumeButton" Style="{StaticResource SmallRoundButton}" Click="MiniVolumeButton_Click"
+                                            PreviewMouseWheel="MiniVolumeButton_PreviewMouseWheel"
                                             ToolTip="{Binding Source={x:Static loc:Loc.Default}, Path=Item[mt_volume]}">
                                         <TextBlock x:Name="MiniVolumeGlyph" Text="&#xE995;" FontFamily="Segoe MDL2 Assets" FontSize="15"
                                                    HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                     </Button>
-                                    <Popup x:Name="VolumePopup" StaysOpen="False" AllowsTransparency="True"
+                                    <!-- StaysOpen 改成 True：Popup 自带的「点外面关闭」是靠
+                                         在 PopupRoot 上抓 SubTree 鼠标捕获实现的，浮层里
+                                         再让滑条 CaptureMouse 就会把它顶掉，拖完一条另一条
+                                         就失联（这就是之前怎么改都不顺手的原因）。
+                                         现在改成自己判定外部点击（Window_PreviewMouseDown
+                                         + 窗口失活），浮层里不再有第二个捕获宿主。 -->
+                                    <Popup x:Name="VolumePopup" StaysOpen="True" AllowsTransparency="True"
                                            Placement="Top" PlacementTarget="{Binding ElementName=MiniVolumeButton}"
-                                           PopupAnimation="Slide" VerticalOffset="-6">
+                                           PopupAnimation="Slide" VerticalOffset="-8" Closed="VolumePopup_Closed">
                                         <Border Background="{DynamicResource FlyoutBgBrush}"
                                                 BorderBrush="{DynamicResource FlyoutBorderBrush}" BorderThickness="1"
-                                                CornerRadius="8" Padding="8,10">
+                                                CornerRadius="10" Padding="14,11" MinWidth="304"
+                                                PreviewMouseWheel="VolumePopup_PreviewMouseWheel">
                                             <StackPanel>
-                                                <Slider x:Name="VolumePopupSlider" Orientation="Vertical" Width="26" Height="150"
-                                                        IsMoveToPointEnabled="True"
-                                                        Minimum="0" Maximum="100"
-                                                        ValueChanged="VolumePopupSlider_ValueChanged"/>
-                                                <!-- 原来的百分比数字去掉了：Popup 宽度是跟着内容走的，
-                                                     "99%" 变成 "100%" 时 TextBlock 宽了 1 个字符，
-                                                     整个浮层会跟着重新居中，看起来就是「突然一抖」。
-                                                     现在用固定宽度的圆点刻度代替，宽度恒定不变。 -->
-                                                <Grid Height="4" Margin="0,6,0,0" Width="150">
-                                                    <Border Height="4" CornerRadius="2" VerticalAlignment="Center"
-                                                            Background="{DynamicResource SubtleFillHoverBrush}"/>
-                                                    <Border x:Name="VolumeFillBar" Height="4" CornerRadius="2"
-                                                            VerticalAlignment="Center" HorizontalAlignment="Left"
-                                                            Background="{DynamicResource AccentBrush}"/>
+                                                <!-- 主音量 -->
+                                                <Grid Height="24">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                        <ColumnDefinition Width="*"/>
+                                                        <ColumnDefinition Width="Auto"/>
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock Text="&#xE767;" FontFamily="Segoe MDL2 Assets" FontSize="14"
+                                                               VerticalAlignment="Center"
+                                                               Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                                    <TextBlock x:Name="VolumePopupLabel" Grid.Column="1" Margin="8,0,0,0"
+                                                               FontSize="12.5" VerticalAlignment="Center"
+                                                               Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                                    <Slider x:Name="VolumePopupSlider" Grid.Column="2"
+                                                            Style="{StaticResource FlyoutHSlider}" Width="170" Margin="12,0"
+                                                            Minimum="0" Maximum="100" IsMoveToPointEnabled="True"
+                                                            PreviewMouseLeftButtonDown="VolumeSlider_PreviewMouseLeftButtonDown"
+                                                            PreviewMouseMove="VolumeSlider_PreviewMouseMove"
+                                                            PreviewMouseLeftButtonUp="VolumeSlider_PreviewMouseLeftButtonUp"
+                                                            LostMouseCapture="VolumeSlider_LostMouseCapture"
+                                                            ValueChanged="VolumePopupSlider_ValueChanged"/>
+                                                    <TextBlock x:Name="VolumePopupText" Grid.Column="3" MinWidth="40"
+                                                               TextAlignment="Right" FontSize="12.5"
+                                                               VerticalAlignment="Center"
+                                                               Foreground="{DynamicResource TextSecondaryBrush}"/>
                                                 </Grid>
+
+                                                <!-- 视频背景音量行已撤（用户 2026-11-08 要求）：
+                                                     背景视频音量继续按设置值生效，不再单独露出。 -->
                                             </StackPanel>
                                         </Border>
                                     </Popup>
                                 </Grid>
 
-                                <!-- 音效（开着音效加强时图标着色） -->
-                                <Grid VerticalAlignment="Center" Margin="6,0,0,0">
-                                    <Button x:Name="MiniFxButton" Style="{StaticResource SmallRoundButton}" Click="MiniFxButton_Click"
-                                            ToolTip="{Binding Source={x:Static loc:Loc.Default}, Path=Item[mt_fx]}">
-                                        <TextBlock x:Name="MiniFxGlyph" Text="&#xE8A7;" FontFamily="Segoe MDL2 Assets" FontSize="16" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                    </Button>
-                                    <Popup x:Name="FxPopup" StaysOpen="False" AllowsTransparency="True"
-                                           Placement="Top" PlacementTarget="{Binding ElementName=MiniFxButton}"
-                                           PopupAnimation="Fade" VerticalOffset="-6">
-                                        <Border Background="{DynamicResource FlyoutBgBrush}"
-                                                BorderBrush="{DynamicResource FlyoutBorderBrush}" BorderThickness="1"
-                                                CornerRadius="8" MinWidth="170">
-                                            <!-- FxPopupPanel 会被 BuildFxPopup 清空后重填（预设单选 + 分隔线 + EQ 按钮），
-                                                 所以 EQ 按钮必须待在这个面板里，不能挪到外层。 -->
-                                            <StackPanel x:Name="FxPopupPanel">
-                                                <StackPanel.Resources>
-                                                    <Style TargetType="RadioButton">
-                                                        <Setter Property="Margin" Value="6,3"/>
-                                                        <Setter Property="Padding" Value="8,5"/>
-                                                        <Setter Property="FontSize" Value="13"/>
-                                                    </Style>
-                                                </StackPanel.Resources>
-                                                <Separator Margin="6,4"/>
-                                                <Button x:Name="FxPopupEqButton" Margin="6,2,6,6" Padding="10,6" HorizontalAlignment="Stretch"
-                                                        Style="{StaticResource GhostButtonStyle}"
-                                                        Click="FxPopupEqButton_Click">
-                                                    <StackPanel Orientation="Horizontal">
-                                                        <TextBlock Text="&#xE189;" FontFamily="Segoe MDL2 Assets" FontSize="13" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                                                        <TextBlock Text="均衡器（10段 EQ）" FontSize="13" VerticalAlignment="Center"/>
-                                                    </StackPanel>
-                                                </Button>
-                                            </StackPanel>
-                                        </Border>
-                                    </Popup>
-                                </Grid>
+                                <!-- 评论区：对正在播的歌开/收评论抽屉。 -->
+                                <Button x:Name="MiniCommentButton" Margin="6,0,0,0" Style="{StaticResource SmallRoundButton}"
+                                        Click="MiniCommentButton_Click"
+                                        ToolTip="{Binding Source={x:Static loc:Loc.Default}, Path=Item[fs_comment]}">
+                                    <TextBlock Text="&#xE8BD;" FontFamily="Segoe MDL2 Assets" FontSize="15"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Button>
 
                                 <!-- 桌面歌词开关。放在这一排最右边：歌词是「看现在在放什么」的
                                      全局功能，跟底部播放栏同一条视线最省事，不用去歌单里翻。
-                                     原来这个位置是「最近播放」按钮，重复了——左��导航本来就有。 -->
+                                     原来这个位置是「最近播放」按钮，重复了——左侧导航本来就有。 -->
                                 <Button x:Name="MiniLyricButton" Margin="6,0,0,0" Style="{StaticResource SmallRoundButton}"
                                         Click="MiniLyricButton_Click"
                                         ToolTip="{Binding Source={x:Static loc:Loc.Default}, Path=Item[lyric_toggle_off]}">
                                     <TextBlock x:Name="MiniLyricGlyph" Text="&#xE8D2;" FontFamily="Segoe MDL2 Assets" FontSize="15"
                                                HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                 </Button>
+
+                                <!-- 内存释放键：调 Services/MemoryRelease.ReleaseNow（与托盘驻留、
+                                     调试面板「立即释放」共用同一份实现），清封面内存缓存 + GC 压缩 +
+                                     工作集换出，完成后 Toast 提示。图标用 Segoe MDL2 的 E74D（Delete，
+                                     用户认知里的「清理」语义），样式与相邻小圆键完全一致。 -->
+                                <Button x:Name="MiniMemButton" Margin="6,0,0,0" Style="{StaticResource SmallRoundButton}"
+                                        Click="MiniMemButton_Click"
+                                        ToolTip="{Binding Source={x:Static loc:Loc.Default}, Path=Item[mt_mem_release]}">
+                                    <TextBlock Text="&#xE74D;" FontFamily="Segoe MDL2 Assets" FontSize="15"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Button>
+
+                                <!-- 更多：⋯ 键（用户要求去掉悬停浮现/隐身的淡化动画），
+                                     常显常可点；列表里收「更名 / 音效」。 -->
+                                <Border x:Name="MiniMoreWrap" Margin="8,0,0,0" VerticalAlignment="Center">
+                                    <Button x:Name="MiniMoreButton" Style="{StaticResource SmallRoundButton}"
+                                            Click="MiniMoreButton_Click" ToolTip="更多选项">
+                                        <TextBlock Text="&#xE712;" FontFamily="Segoe MDL2 Assets" FontSize="15"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Button>
+                                </Border>
+                                <!-- 更多列表浮层：样式照搬音量/音效浮层（FlyoutBg + 顶弹）。
+                                     侧序键用 GhostButtonStyle，文字跟主题走。 -->
+                                <Popup x:Name="MiniMorePopup" StaysOpen="False" AllowsTransparency="True"
+                                       Placement="Top" PlacementTarget="{Binding ElementName=MiniMoreWrap}"
+                                       PopupAnimation="Fade" VerticalOffset="-6">
+                                    <Border Background="{DynamicResource FlyoutBgBrush}"
+                                            BorderBrush="{DynamicResource FlyoutBorderBrush}" BorderThickness="1"
+                                            CornerRadius="8" MinWidth="152" Padding="4,4">
+                                        <StackPanel>
+                                            <Button x:Name="MiniMenuRename" Style="{StaticResource GhostButtonStyle}" Margin="2,0"
+                                                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Padding="8,6"
+                                                    Foreground="{DynamicResource TextPrimaryBrush}"
+                                                    Click="MiniMenuRename_Click">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBlock Text="&#xE70F;" FontFamily="Segoe MDL2 Assets" FontSize="13" VerticalAlignment="Center" Margin="0,0,8,0"
+                                                               Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                                    <TextBlock Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[rn_hint]}" FontSize="13" VerticalAlignment="Center"
+                                                               Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                                </StackPanel>
+                                            </Button>
+                                            <Button x:Name="MiniMenuFx" Style="{StaticResource GhostButtonStyle}" Margin="2,0"
+                                                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Padding="8,6"
+                                                    Foreground="{DynamicResource TextPrimaryBrush}"
+                                                    Click="MiniMenuFx_Click">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBlock Text="&#xE8A7;" FontFamily="Segoe MDL2 Assets" FontSize="13" VerticalAlignment="Center" Margin="0,0,8,0"
+                                                               Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                                    <TextBlock Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[mt_fx]}" FontSize="13" VerticalAlignment="Center"
+                                                               Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                                </StackPanel>
+                                            </Button>
+                                        </StackPanel>
+                                    </Border>
+                                </Popup>
+                                <!-- 音效预设浮层：⋯ 列表「音效」点开，程序内弹窗列出全部预设，
+                                     当前预设打勾，点选即应用（复用 FxPresetPage.ApplyPreset）。 -->
+                                <Popup x:Name="MiniFxPopup" StaysOpen="False" AllowsTransparency="True"
+                                       Placement="Top" PlacementTarget="{Binding ElementName=MiniMoreWrap}"
+                                       PopupAnimation="Fade" VerticalOffset="-6">
+                                    <Border Background="{DynamicResource FlyoutBgBrush}"
+                                            BorderBrush="{DynamicResource FlyoutBorderBrush}" BorderThickness="1"
+                                            CornerRadius="8" MinWidth="200" MaxHeight="420" Padding="4,4">
+                                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                            <StackPanel x:Name="MiniFxList"/>
+                                        </ScrollViewer>
+                                    </Border>
+                                </Popup>
                             </StackPanel>
                         </Grid>
                     </Border>
@@ -640,7 +868,32 @@
             </Grid>
         </Border>
 
+        <!-- 播放定位小球：单击=跳到正在播放的歌所在列表（行滚动到视口中央+高亮脉冲），
+             长按约 250ms 进入拖动模式，松手落位并写回设置，下次启动原位恢复。
+             插在 ContentCard 之后、标题栏元素之前：z 序压住页面内容、又让位标题栏。
+             底色由代码按主题强调色实时刷（半透明），图标用音乐符。 -->
+        <Grid x:Name="PlayLocateBall" Grid.RowSpan="2" Width="44" Height="44"
+              HorizontalAlignment="Left" VerticalAlignment="Top" Margin="0,0,0,0"
+              Cursor="Hand" Visibility="Collapsed" Background="Transparent"
+              RenderTransformOrigin="0.5,0.5"
+              shell:WindowChrome.IsHitTestVisibleInChrome="True"
+              ToolTip="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_ball_hint]}"
+              MouseLeftButtonDown="PlayLocateBall_MouseLeftButtonDown"
+              MouseMove="PlayLocateBall_MouseMove"
+              MouseLeftButtonUp="PlayLocateBall_MouseLeftButtonUp"
+              Mouse.LostMouseCapture="PlayLocateBall_LostMouseCapture">
+            <Grid.RenderTransform>
+                <!-- 手感物理用：拖住轻微放大（1.05）、松手回弹 1.0，
+                     以中心为原点缩放，球不会往一角歪。 -->
+                <ScaleTransform x:Name="BallScale" ScaleX="1" ScaleY="1"/>
+            </Grid.RenderTransform>
+            <Ellipse x:Name="PlayLocateBallBg" Fill="#B31C1C1C" Stroke="#55FFFFFF" StrokeThickness="1"/>
+            <TextBlock Text="&#xE8D6;" FontFamily="Segoe MDL2 Assets" FontSize="18"
+                       Foreground="#F2FFFFFF" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+        </Grid>
+
         <!-- ============ 标题栏：左图标+标题（可拖动区），中间搜索框，右窗口控制 ============ -->
+        <!-- 标题栏左：图标 + Miku Music 标题（不挂任何入口，避免压到左侧导航） -->
         <StackPanel Grid.Row="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0"
                     shell:WindowChrome.IsHitTestVisibleInChrome="True">
             <Image x:Name="AppTitleIcon" Width="19" Height="19" Stretch="Uniform" Margin="0,0,8,0"/>
@@ -648,9 +901,28 @@
                        FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center"/>
         </StackPanel>
 
+        <!-- 标题栏右：选项 / 账号。点击直接切到对应的内置页（与左侧导航同一条路），
+             不再弹出浮层列表；「账号」进独立的账号页。 -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" VerticalAlignment="Center"
+                    HorizontalAlignment="Right" Margin="0,0,472,0"
+                    shell:WindowChrome.IsHitTestVisibleInChrome="True">
+            <Button x:Name="TitleOptionsButton" Content="选项"
+                    Margin="0,0,6,0" Padding="12,3" FontSize="12.5"
+                    Style="{StaticResource TitleBarIconButton}" Click="TitleOptionsButton_Click"
+                    shell:WindowChrome.IsHitTestVisibleInChrome="True"
+                    ToolTip="打开设置"/>
+            <Button x:Name="TitleAccountsButton" Content="账号"
+                    Padding="12,3" FontSize="12.5"
+                    Style="{StaticResource TitleBarIconButton}" Click="TitleAccountsButton_Click"
+                    shell:WindowChrome.IsHitTestVisibleInChrome="True"
+                    ToolTip="打开各平台与 BBDown 登录"/>
+        </StackPanel>
+
         <!-- 搜索框放在标题栏里（最小化/最大化/关闭同一行）。
              shell:WindowChrome.IsHitTestVisibleInChrome=True 必不可少：不然 WindowChrome
-             会把这一行当成标题栏拖动区，点不进去、也打不了字。 -->
+             会把这一行当成标题栏拖动区，点不进去、也打不了字。
+             输入区是「标签卡 + 输入框」的组合：敲完一个词按空格，那个词自动包成
+             小卡片排在前面；点卡片又化回原文回到输入框里改。整排内容横向滚动。 -->
         <Border Grid.Row="0" Width="320" Height="24" HorizontalAlignment="Right" Margin="0,0,142,0"
                 VerticalAlignment="Center" CornerRadius="12"
                 Background="{DynamicResource ControlFillBrush}"
@@ -658,38 +930,196 @@
                 shell:WindowChrome.IsHitTestVisibleInChrome="True">
             <Grid>
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
-                <TextBlock Grid.Column="0" Text="&#xE721;" FontFamily="Segoe MDL2 Assets" FontSize="12"
-                           Foreground="{DynamicResource TextTertiaryBrush}" VerticalAlignment="Center" Margin="9,0,0,0"/>
-                <TextBox x:Name="TitleSearchBox" Grid.Column="1"
-                         Background="Transparent" BorderThickness="0" Padding="12,0,0,0"
-                         Template="{StaticResource TitleSearchBoxTemplate}"
-                         FontSize="12.5" VerticalContentAlignment="Center"
-                         Foreground="{DynamicResource TextPrimaryBrush}"
-                         CaretBrush="{DynamicResource TextPrimaryBrush}"
-                         SelectionBrush="{DynamicResource AccentBrush}"
-                         TextChanged="TitleSearchBox_TextChanged"
-                         KeyDown="TitleSearchBox_KeyDown"
-                         PreviewKeyDown="TitleSearchBox_PreviewKeyDown"/>
-                <!-- 提示文字比光标再往右 8px：光标固定在 12px，提示文字放 20px，
-                     这样空输入时那个闪烁的竖线不会紧贴/压住提示字（用户要求留点间隔）。
-                     代价是第一次敲字时文字出现在 12px、提示字在 20px，有一次很小的跳动。 -->
-                <TextBlock x:Name="TitleSearchHint" Grid.Column="1" Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[nav_search]}"
+                <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Disabled"
+                              HorizontalScrollBarVisibility="Disabled"
+                              HorizontalContentAlignment="Stretch">
+                    <!-- 输入框 + 淡色补全。补全那半截画在输入框上面（同一个 Grid 里叠着），
+                         左边距顶到已敲文字的末尾，看上去就是「字后面跟着一串淡的」。
+                         用覆盖层而不是直接改 Text：改 Text 会毁掉光标位置和撤销栈，
+                         而且用户一敲字就把他没敲的东西塞进输入框了。
+                         Tab = 采纳补全并搜索，Enter = 按原样搜索。
+
+                         横向滚动必须 Disabled：Hidden 模式下 ScrollViewer 按「无限宽」
+                         测量内容，输入框撑不开、永远只有 MinWidth 那一截，药丸中段
+                         全是点不到的死区（表现就是「点中间不对焦」）。Disabled 后
+                         内容被约束到视口宽度，输入框铺满整条，点哪儿都在框里；
+                         文字太长时 TextBox 自己内部滚，不依赖外层。 -->
+                    <Grid HorizontalAlignment="Stretch">
+                        <TextBox x:Name="TitleSearchBox" MinWidth="140"
+                                 HorizontalAlignment="Stretch"
+                                 Background="Transparent" BorderThickness="0" Padding="12,0,2,0"
+                                 Template="{StaticResource TitleSearchBoxTemplate}"
+                                 FontSize="12.5" VerticalContentAlignment="Center"
+                                 Foreground="{DynamicResource TextPrimaryBrush}"
+                                 CaretBrush="{DynamicResource TextPrimaryBrush}"
+                                 SelectionBrush="{DynamicResource AccentBrush}"
+                                 TextChanged="TitleSearchBox_TextChanged"
+                                 GotFocus="TitleSearchBox_GotFocus"
+                                 LostFocus="TitleSearchBox_LostFocus"
+                                 PreviewMouseDown="TitleSearchBox_PreviewMouseDown"
+                                 KeyDown="TitleSearchBox_KeyDown"
+                                 PreviewKeyDown="TitleSearchBox_PreviewKeyDown"/>
+                        <TextBlock x:Name="TitleSearchGhost" IsHitTestVisible="False"
+                                   FontSize="12.5" VerticalAlignment="Center" HorizontalAlignment="Left"
+                                   Foreground="{DynamicResource TextTertiaryBrush}" Opacity="0.55"
+                                   Margin="12,0,0,0" Visibility="Collapsed"/>
+                    </Grid>
+                </ScrollViewer>
+                <!-- 提示文字只在「卡片和输入框都空着」时露出；
+                     敲字之后由 CommitTitleSearchPlaceholder 控制（那里也看卡片数）。 -->
+                <TextBlock x:Name="TitleSearchHint" Grid.Column="0" Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[nav_search]}"
                            FontSize="12.5" Foreground="{DynamicResource TextTertiaryBrush}"
                            VerticalAlignment="Center" Margin="20,0,0,0" IsHitTestVisible="False"/>
-                <Button x:Name="TitleSearchButton" Grid.Column="2" Width="26" Height="22" Margin="0,0,1,0"
-                        VerticalAlignment="Center"
-                        Style="{StaticResource TitleBarIconButton}" Click="TitleSearchButton_Click"
-                        shell:WindowChrome.IsHitTestVisibleInChrome="True"
-                        ToolTip="{Binding Source={x:Static loc:Loc.Default}, Path=Item[nav_search]}">
-                    <TextBlock Text="&#xE721;" FontFamily="Segoe MDL2 Assets" FontSize="12"
-                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                <!-- 清除键：输入框里有内容才露出来，一点清空回到提示态。
+                     放在输入区右边、贴着药丸的圆弧，比放大镜更实用——
+                     原来右侧那个放大镜和左边重复，清空反而要按半天退格。 -->
+                <Button x:Name="TitleSearchClear" Grid.Column="1" Width="18" Height="18"
+                        Margin="4,0,6,0" VerticalAlignment="Center"
+                        Background="Transparent" Cursor="Hand" Focusable="False"
+                        Foreground="{DynamicResource TextSecondaryBrush}"
+                        Visibility="Collapsed" Click="TitleSearchClear_Click"
+                        ToolTip="{Binding Source={x:Static loc:Loc.Default}, Path=Item[act_clear_search]}">
+                    <Button.Template>
+                        <ControlTemplate TargetType="Button">
+                            <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="9">
+                                <TextBlock Text="&#xE8BB;" FontFamily="Segoe MDL2 Assets" FontSize="10"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                                           Foreground="{TemplateBinding Foreground}"/>
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="Bd" Property="Background" Value="{DynamicResource SubtleFillHoverBrush}"/>
+                                </Trigger>
+                                <Trigger Property="IsPressed" Value="True">
+                                    <Setter TargetName="Bd" Property="Background" Value="{DynamicResource SubtleFillPressedBrush}"/>
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Button.Template>
                 </Button>
             </Grid>
         </Border>
+
+        <!-- 搜索建议：输入框下方弹出的「都有哪种歌」列表。
+             输入框本身只留用户敲的那个词（默认展示词），歌名、歌手、命中高亮都放这里。
+             用 Popup 而不是就地插进标题栏 Grid：Popup 自带一个顶层窗口，
+             不会被标题栏那套 WindowChrome 的命中测试挡掉，点列表项能正常响应；
+             也不需要给主 Grid 加 ZIndex，不会盖到别的层上面去。 -->
+        <Popup x:Name="TitleSuggestPopup"
+               PlacementTarget="{Binding ElementName=TitleSearchBox}"
+               Placement="Bottom"
+               VerticalOffset="2"
+               StaysOpen="True"
+               AllowsTransparency="True"
+               Focusable="False"
+               PopupAnimation="Fade">
+            <!-- 常驻滚动区：只露 6 行左右，多出来的（第 7、8 条往后）靠鼠标滚轮上下翻。
+                 滚动条用 Hidden 而不是 Auto —— Auto 会画出一条系统默认的滚动条，
+                 在这个圆角浮层里很跳，而且它一出现就把可用宽度吃掉、行里的文字被截。
+                 Hidden 是「不画但仍可滚」，行为上正好是「滑栏隐藏、内滚轮滑动」。
+                 行高约 44px：6 行 264 + ItemsControl 上下 8 ≈ 272，留 288。
+                 MaxHeight 给小了会把最后一行裁掉而不是出滚动区，
+                 ScrollViewer 是在 Measure 里按可用高度算滚动条的。 -->
+            <Border Width="360" MaxHeight="288" Margin="0,4,0,0"
+                    Background="{DynamicResource FlyoutBgBrush}"
+                    BorderBrush="{DynamicResource FlyoutBorderBrush}" BorderThickness="1"
+                    CornerRadius="10"
+                    shell:WindowChrome.IsHitTestVisibleInChrome="True">
+                <!-- 这里必须用 DockPanel，不能用 Grid。
+                     Grid 那条隐式行是 Auto，会拿「无限高」去量 ScrollViewer，
+                     于是 ScrollViewer 直接长成内容那么高（14 行 ≈ 460px），
+                     外层 Border 的 MaxHeight 只是把它视觉上裁掉：
+                     ViewportHeight 跟着变大、ScrollableHeight 恒为 0，
+                     结果就是「看得见 7 行、底下 7 行永远滚不到」。
+                     DockPanel 的最后一个子元素拿到的是**剩下的有限高度**，
+                     ScrollViewer 才会真的变成可滚区。 -->
+                <DockPanel>
+                    <!-- 右侧滑栏：上半格写当前条数，下面是轨道 + 滑块。
+                         用自绘滑块而不是系统 ScrollBar：系统那条默认样式在这个圆角浮层里
+                         很跳，而且会把可用宽度吃掉、行里的歌名被截。滑块高度按
+                         「可视高 / 内容高」算，位置跟着滚动比例走，可以直接拖着走。 -->
+                    <Grid DockPanel.Dock="Right" Width="26">
+                        <Border x:Name="TitleSuggestTrack" Width="4" CornerRadius="2"
+                                HorizontalAlignment="Center" Margin="0,17,0,10"
+                                Background="{DynamicResource TextTertiaryBrush}" Opacity="0.10"/>
+                        <Border x:Name="TitleSuggestThumb" Width="4" CornerRadius="2"
+                                HorizontalAlignment="Center" VerticalAlignment="Top"
+                                Margin="0,17,0,0" MinHeight="18"
+                                Background="{DynamicResource AccentBrush}" Opacity="0.55"
+                                PreviewMouseLeftButtonDown="TitleSuggestThumb_PreviewMouseLeftButtonDown"
+                                MouseMove="TitleSuggestThumb_MouseMove"
+                                MouseLeftButtonUp="TitleSuggestThumb_MouseLeftButtonUp"
+                                Cursor="Hand"/>
+                        <TextBlock x:Name="TitleSuggestCount" VerticalAlignment="Top"
+                                   HorizontalAlignment="Center" FontSize="9.5"
+                                   Foreground="{DynamicResource TextTertiaryBrush}"/>
+                    </Grid>
+                    <!-- 保护期状态条：点了某条结果但歌还没真正播出来时露出来。
+                         原来点一下列表立刻收掉，取流那几秒（VIP 更久）界面上
+                         什么动静都没有，看着像「点了没反应，列表还自己跑了」。
+                         现在列表在保护期里留着，不设超时：播起来才收，
+                         取流失败也会收；期间再点别的行记成「追击」接力播。 -->
+                    <Border x:Name="TitleSuggestStatus" DockPanel.Dock="Bottom" Visibility="Collapsed"
+                            Margin="6,2,6,6" Padding="9,5" CornerRadius="8"
+                            Background="{DynamicResource AccentSubtleBrush}">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock x:Name="TitleSuggestSpin" Text="&#xE895;" FontFamily="Segoe MDL2 Assets"
+                                       FontSize="11" Foreground="{DynamicResource AccentBrush}"
+                                       VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+                                <TextBlock.RenderTransform>
+                                    <RotateTransform x:Name="TitleSuggestSpinRotate"/>
+                                </TextBlock.RenderTransform>
+                            </TextBlock>
+                            <TextBlock x:Name="TitleSuggestStatusText" Margin="7,0,0,0" FontSize="11.5"
+                                       Foreground="{DynamicResource AccentBrush}"
+                                       VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                        </StackPanel>
+                    </Border>
+                    <!-- 滚轮走 SmoothScroll（下面 PreviewMouseWheel），所以这里必须是
+                         按像素滚的（CanContentScroll=False）；按项滚会和像素偏移打架。
+                         纵向滚动条是 Hidden 不是 Disabled：Disabled 在 WPF 里是
+                         「彻底不许滚」——内容直接被裁掉，ScrollableHeight 恒为 0，
+                         滚轮和拖 Thumb 都推不动分毫。Hidden 才是「不画但仍可滚」。
+                         滚动的视觉表现交给右边自绘的那条滑栏。
+                         横向**必须**是 Disabled：Hidden 在横向是「可横向滚但不画」，
+                         于是 ScrollViewer 按**无限宽**去量内容 —— 只要列表里有一条
+                         长标题，整张表就被撑到 440px 宽，每行的歌名钉在左、
+                         平台/VIP 标签钉在右，标签全都落在 332px 视口外面被裁掉，
+                         看上去就是「标签没打上」。歌名右边那点省略号也一起没了
+                         （同样因为没按视口宽去量，TextTrimming 根本不生效）。
+                         Disabled 才会按视口宽量：歌名该省略省略，标签贴右边看得见。
+                         横向本来也不需要滚 —— 行内容理应塞进弹层宽度里。 -->
+                    <ScrollViewer x:Name="TitleSuggestScroll"
+                                  VerticalScrollBarVisibility="Hidden"
+                                  HorizontalScrollBarVisibility="Disabled"
+                                  CanContentScroll="False"
+                                  ScrollChanged="TitleSuggestScroll_ScrollChanged"
+                                  PreviewMouseWheel="TitleSuggestScroll_PreviewMouseWheel">
+                        <ItemsControl x:Name="TitleSuggestList" Margin="0,4">
+                            <!-- 这里必须换掉默认模板。
+                                 ItemsControl 的默认模板里**自带一个 ScrollViewer**，
+                                 和上面那个叠成了两层滚动区：外层量到的子元素
+                                 是「已经被内层量成可视高度的那一个」，
+                                 于是外层 ScrollableHeight 恒为 0、ExtentHeight 跟着
+                                 永远等于 ViewportHeight。
+                                 外面那条 PreviewMouseWheel 又把 e.Handled 置了 true，
+                                 内层 ScrollViewer 的默认滚动手势就被挡掉了 ——
+                                 结果是：内容确实超出一屏、下面几行被裁着，
+                                 但滚轮怎么转、拇指怎么拖，列表都纹丝不动。
+                                 换成裸 ItemsPresenter，全弹层只剩一个滚动区。 -->
+                            <ItemsControl.Template>
+                                <ControlTemplate TargetType="{x:Type ItemsControl}">
+                                    <ItemsPresenter/>
+                                </ControlTemplate>
+                            </ItemsControl.Template>
+                        </ItemsControl>
+                    </ScrollViewer>
+                </DockPanel>
+            </Border>
+        </Popup>
 
         <StackPanel Grid.Row="0" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center"
                     shell:WindowChrome.IsHitTestVisibleInChrome="True">
@@ -769,6 +1199,11 @@
                            Margin="30" Visibility="Collapsed"/>
             </Grid>
         </Border>
+
+        <!-- 第三界面：评论抽屉（贴右缘、宽 360 的覆盖面板）。
+             放在 ToastPanel 之前 => 浮动提示条仍压在它上面；
+             Grid.Row=1 => 不盖 34px 标题栏（最小化等按钮始终可点）。 -->
+        <views:CommentsPanel x:Name="CommentsPanel" Grid.Row="1" Visibility="Collapsed"/>
 
         <!-- 浮动提示条：浮于一切内容之上，不顶动内容 -->
         <StackPanel x:Name="ToastPanel" Grid.RowSpan="2"

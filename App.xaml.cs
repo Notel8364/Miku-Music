@@ -31,7 +31,10 @@ public partial class App : Application
 		{
 			Services.LogHelper.LogError(args.Exception, "未处理异常");
 			Services.LogHelper.Flush();
-			Services.MusicService.Stop();
+			// 不再在这里 Stop()：UI 线程上任何一处偶发异常（动画回调、第三方控件、
+			// 单次 IO 抖动）都会让正在播的歌被静默掐掉，用户只看到「突然不响了」。
+			// 改为记录后继续运行；真出了致命问题，后续操作会继续报错、日志里也有完整栈。
+			args.Handled = true;
 		};
 
 		// 抢到锁之后才建主窗口。必须赋给 Application.MainWindow：

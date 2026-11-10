@@ -11,34 +11,54 @@
         ResizeMode="CanResize"
         MinWidth="420" MinHeight="200"
         SizeToContent="Manual"
-        FontFamily="Microsoft YaHei UI">
+        FontFamily="Microsoft YaHei UI"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True"
+        TextOptions.TextFormattingMode="Display"
+        TextOptions.TextRenderingMode="Grayscale">
 
-    <Border x:Name="Root"
-            CornerRadius="12"
-            BorderThickness="1"
-            ClipToBounds="True"
-            Background="{DynamicResource FlyoutBgBrush}"
-            BorderBrush="{DynamicResource FlyoutBorderBrush}">
-        <Border.Effect>
-            <DropShadowEffect BlurRadius="26" ShadowDepth="4" Opacity="0.5" Color="#000000"/>
-        </Border.Effect>
+    <!-- 阴影和内容分两层：Effect 会把挂着它的整棵子树先渲染成一张位图再模糊叠加，
+         挂在内容根上等于把所有歌词文字都过一遍位图采样，字边必然发虚
+         （用户看到的就是「歌词分辨率比主界面低一档」）。这里让一个空壳 Border
+         专门负责投影，文字层不挂任何 Effect，字形直接由渲染管线出。 -->
+    <Grid>
+        <!-- 外壳：只负责「底 + 投影」。穿透态下要连它一起收干净——
+             只把 Root 变透明是不够的，这层还铺着主题底色，
+             窗口看着依然是一块不透明的板子（用户报的「穿透后背景没跟着穿透」）。 -->
+        <Border x:Name="ShadowShell" CornerRadius="12" Background="{DynamicResource FlyoutBgBrush}">
+            <Border.Effect>
+                <DropShadowEffect BlurRadius="26" ShadowDepth="4" Opacity="0.5" Color="#000000"/>
+            </Border.Effect>
+        </Border>
+
+        <Border x:Name="Root"
+                CornerRadius="12"
+                BorderThickness="1"
+                ClipToBounds="True"
+                Background="{DynamicResource FlyoutBgBrush}"
+                BorderBrush="{DynamicResource FlyoutBorderBrush}"
+                MouseLeftButtonDown="Surface_MouseLeftButtonDown">
 
         <Grid>
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
-<!-- 标题条：整行分成「悬停才显」和「常驻」两段。
-                 穿透按钮必须放在 DragBar 外面、单独一层：
-                 DragBar 在穿透态是 Opacity=0 的（竖横、翻译、关闭
-                 都跟着一起透明），把穿透按钮放进去它也会一起消失，
-                 而它恰恰是关掉穿透之后唯一不需要鼠标精确悬停就能点的入口。
-                 套一层 Grid 就是为了让它独立于 DragBar 的透明度。
-
+<!-- 标题条：整行分三列，中间一列 Auto，两边等宽的 * 让键位居中。
                  左边的歌名整块去掉了：这一行宽度有限，歌名一占位
                  竖横/翻译/关闭就得往右边挤，而这几个键才是常用的。
-                 想知道在放哪首，看主窗口和托盘就行。 -->
+
+                 四个键的顺序是「竖横 + 翻译 + 穿透 + 关闭」：
+                 关闭在穿透的右边。原来关闭排在穿透左边，关闭和穿���
+                 贴在一起，误关的代价比误切穿透大得多，分开放更安全。
+
+                 穿透键放在同一个 DragBar 里（原来它单独套了一层，
+                 是为了不被 DragBar 的淡入淡出连带隐藏）。现在改成
+                 淡入淡出只作用于 Mode/Translation/Close 三个键本身，
+                 DragBar 整体透明度恒为 1，于是穿透键既不会被一起收走，
+                 又能留在关闭键左边，两边的好处兼得。 -->
             <Grid Grid.Row="0" Height="30">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
@@ -46,42 +66,46 @@
                     <ColumnDefinition Width="*"/>
                 </Grid.ColumnDefinitions>
 
-                <!-- 悬停段：竖横 + 翻译 + 关闭。放在中间一列居中，
-                     两边留等宽的 *，所以看起来是整条居中而不是贴右。 -->
-                <!-- 中间这组键整体居中：外层 * / Auto / * 三列，
-                     里面的「悬停段 + 常驻穿透键」是一个 Auto 宽的组合。 -->
-                <Grid Grid.Column="1">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-
-                <!-- 悬停段：竖横 + 翻译 + 关闭 -->
-                <Grid x:Name="DragBar" Grid.Column="0" Background="Transparent"
+                <Grid x:Name="DragBar" Grid.Column="1" Background="Transparent"
                       MouseLeftButtonDown="DragBar_MouseLeftButtonDown"
+                      MouseMove="DragBar_MouseMove"
+                      MouseLeftButtonUp="DragBar_MouseLeftButtonUp"
+                      LostMouseCapture="DragBar_LostMouseCapture"
                       MouseRightButtonUp="DragBar_MouseRightButtonUp">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
 
-                <!-- 竖/横切换：竖排是「上中下三句滚动」，横排是「单行字幕带」 -->
-                <ToggleButton x:Name="ModeButton" Grid.Column="0" Width="26" Height="22"
-                              Margin="0,0,2,0" VerticalAlignment="Center"
-                              Style="{StaticResource MiniToggleButton}"
-                              Click="ModeButton_Click"
-                              ToolTip="Vertical / Horizontal">
-                    <TextBlock x:Name="ModeGlyph" Text="&#xE8D2;" FontFamily="Segoe MDL2 Assets"
-                               FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                </ToggleButton>
+                <!-- 竖/横切换键已撤：竖排横排各有人喜欢，但这个键一年用不了几次，
+                     常驻标题条反而占地方。想换布局时在设置里改 LyricWindowVertical
+                     仍有完整功能，标题条只留常用的三个键。
 
-                <ToggleButton x:Name="TranslationButton" Grid.Column="1" Width="26" Height="22"
-                              Margin="0,0,2,0" VerticalAlignment="Center"
+                 三个键统一铺一层淡淡的底（ControlFillBrush）：
+                 原来未选中时是全透明的，三个图标浮在歌词上像三个孤零零的字，
+             悬停才知道能点。现在一眼能看出「这是三个按钮」，选中态仍是强调色。 -->
+                <ToggleButton x:Name="TranslationButton" Grid.Column="0" Width="26" Height="22"
+                              Margin="2,0,2,0" VerticalAlignment="Center"
+                              Background="{DynamicResource ControlFillBrush}"
                               Style="{StaticResource MiniToggleButton}"
                               Click="TranslationButton_Click"
                               ToolTip="Translation">
                     <TextBlock Text="&#xE8C1;" FontFamily="Segoe MDL2 Assets"
+                               FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </ToggleButton>
+
+                <!-- 穿透开关：唯一「不靠悬停就能点到」的入口，穿透态下常驻。
+                     淡入淡出只作用于另外三个键（见 ApplyBarOpacity），
+                     所以它不需要单独套一层来躲开透明度。 -->
+                <ToggleButton x:Name="PassthroughButton" Grid.Column="1" Width="26" Height="22"
+                              Margin="0,0,2,0" VerticalAlignment="Center"
+                              Background="{DynamicResource ControlFillBrush}"
+                              Style="{StaticResource MiniToggleButton}"
+                              Click="PassthroughButton_Click"
+                              ToolTip="Click-through">
+                    <TextBlock Text="&#xE7F4;" FontFamily="Segoe MDL2 Assets"
                                FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                 </ToggleButton>
 
@@ -92,8 +116,9 @@
                      免得「关掉弹窗」和「点不到字」互相打架——
                      穿透开着的时候误点关闭只会让人找不到窗口。 -->
                 <Button x:Name="CloseButton" Grid.Column="2" Width="26" Height="22"
-                        VerticalAlignment="Center" Focusable="False"
-                        Background="Transparent" Cursor="Hand"
+                        Margin="0,0,2,0" VerticalAlignment="Center" Focusable="False"
+                        Background="{DynamicResource ControlFillBrush}" Cursor="Hand"
+                        Foreground="{DynamicResource TextPrimaryBrush}"
                         Click="CloseButton_Click" ToolTip="Close">
                     <Button.Template>
                         <ControlTemplate TargetType="Button">
@@ -110,19 +135,6 @@
                     <TextBlock Text="&#xE8BB;" FontFamily="Segoe MDL2 Assets"
                                FontSize="11" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                 </Button>
-                </Grid>
-
-                <!-- 常驻段：鼠标穿透开关。穿透态下依然显示，
-                     否则「开了穿透就再也关不掉」——只能靠快捷键或托盘救。
-                     放在中间一列里，贴着上面那几个键。 -->
-                <ToggleButton x:Name="PassthroughButton" Grid.Column="1" Width="26" Height="22"
-                              Margin="4,0,4,0" VerticalAlignment="Center"
-                              Style="{StaticResource MiniToggleButton}"
-                              Click="PassthroughButton_Click"
-                              ToolTip="Click-through">
-                    <TextBlock Text="&#xE7F4;" FontFamily="Segoe MDL2 Assets"
-                               FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                </ToggleButton>
                 </Grid>
             </Grid>
 
@@ -144,10 +156,15 @@
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
+                <!-- 歌词文字统一用固定色（对应 LyricVisualTheme.Dl*），刻意不写
+                     {DynamicResource}：桌面歌词浮在桌面上、不属于应用窗口，
+                     主题切换不该让它跟着变色。代码里的 ApplyFontColor /
+                     着色恢复也按同一组定值落笔，两边语义一致。
+                     CloseButton 等窗口 chrome 的键仍走主题资源。 -->
                 <TextBlock x:Name="HorizPrev" Grid.Row="0" Margin="16,2"
                            FontSize="12" Opacity="0.34" TextAlignment="Center"
                            TextWrapping="Wrap" MaxHeight="32"
-                           Foreground="{DynamicResource TextSecondaryBrush}"
+                           Foreground="#C8FFFFFF"
                            TextTrimming="CharacterEllipsis"/>
 
                 <!-- 当前句。字号由代码按实际宽度自动缩（FitFontToWidth），
@@ -156,7 +173,7 @@
                     <TextBlock x:Name="HorizCurBase"
                                VerticalAlignment="Center" HorizontalAlignment="Center"
                                TextAlignment="Center" TextWrapping="Wrap"
-                               Foreground="{DynamicResource TextTertiaryBrush}"/>
+                               Foreground="#FFFFFFFF"/>
                     <Border x:Name="HorizCurLitBorder" VerticalAlignment="Center" HorizontalAlignment="Center">
                         <Border.Clip>
                             <RectangleGeometry x:Name="HorizCurClip" Rect="0,0,0,200"/>
@@ -164,14 +181,19 @@
                         <TextBlock x:Name="HorizCurLit"
                                    VerticalAlignment="Center" HorizontalAlignment="Center"
                                    TextAlignment="Center" TextWrapping="Wrap"
-                                   Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                   Foreground="#FF55A2FF"/>
                     </Border>
                 </Grid>
 
+                <!-- 下一句。原Opacity="0.34" 太淡了：再叠上 TextSecondaryBrush(#C8FFFFFF)
+                     实际不透明度只剩 0.78*0.34≈0.27，深色底上基本读不出来，
+                     而这一行正是 PushUp「下一句冒头」要展示的内容——
+                     看不清就直接毁掉那个效果。提到 0.62：仍然明显弱于
+                     当前句，但读得出来。 -->
                 <TextBlock x:Name="HorizNext" Grid.Row="2" Margin="16,2"
-                           FontSize="12" Opacity="0.34" TextAlignment="Center"
+                           FontSize="12" Opacity="0.62" TextAlignment="Center"
                            TextWrapping="Wrap" MaxHeight="32"
-                           Foreground="{DynamicResource TextSecondaryBrush}"
+                           Foreground="#C8FFFFFF"
                            TextTrimming="CharacterEllipsis"/>
 
                 <!-- 翻译。外面套一个裁剪容器 + 两层文字：
@@ -185,20 +207,58 @@
                     <TextBlock x:Name="HorizTranslationOut"
                                HorizontalAlignment="Center" VerticalAlignment="Center"
                                FontSize="13" TextAlignment="Center" TextWrapping="NoWrap"
-                               Foreground="{DynamicResource TextSecondaryBrush}"
+                               Foreground="#A6FFFFFF"
                                Opacity="0" IsHitTestVisible="False"/>
                     <TextBlock x:Name="HorizTranslation"
                                HorizontalAlignment="Center" VerticalAlignment="Center"
                                FontSize="13" TextAlignment="Center" TextWrapping="NoWrap"
                                MaxHeight="20" TextTrimming="CharacterEllipsis"
-                               Foreground="{DynamicResource TextSecondaryBrush}"/>
+                               Foreground="#A6FFFFFF"/>
                 </Grid>
             </Grid>
 
             <!-- 空状态 / 加载中 -->
             <TextBlock x:Name="StatusText" Grid.Row="1" VerticalAlignment="Center" HorizontalAlignment="Center"
                        FontSize="13" TextWrapping="Wrap" TextAlignment="Center" Opacity="0.6"
-                       Foreground="{DynamicResource TextTertiaryBrush}"/>
+                       Foreground="#8AFFFFFF"/>
+
+            <!-- 底部播放键：上一首 / 播放暂停 / 下一首，三键一组居中。
+                 放在歌词窗底部是因为这个窗本来就是「看着歌听歌」的窗口：
+                 切歌和暂停是最常按的键，不该还要伸手去主窗口底栏找。
+                 和标题栏的键一起淡入淡出（见 ApplyBarOpacity），
+                 鼠标移出窗口后同样收起来，不常驻占着底部。
+
+                 Margin 底部留 8px 是必须的：四边伸缩的命中测试把最下面 6px
+                 判成 HTBOTTOM（见 HitTestResizeEdges），按钮压在那 6px 里就永远点不到。 -->
+            <Grid x:Name="TransportBar" Grid.Row="2" Height="30" Margin="0,0,0,8"
+                  Background="Transparent" HorizontalAlignment="Center">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <!-- 底部播放键统一铺一层淡底（和标题条三个键同一套）：
+                         纯图标浮在歌词上像三个字符，铺了底才看得出是按钮。 -->
+                    <Button x:Name="LyricPrevButton" Width="30" Height="26" Margin="0,0,2,0"
+                            Background="{DynamicResource ControlFillBrush}"
+                            Style="{StaticResource MiniIconButton}"
+                            Click="LyricPrevButton_Click" ToolTip="上一首">
+                        <TextBlock Text="&#xE892;" FontFamily="Segoe MDL2 Assets" FontSize="13"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Button>
+                    <Button x:Name="LyricPlayButton" Width="34" Height="26" Margin="0,0,2,0"
+                            Background="{DynamicResource ControlFillBrush}"
+                            Style="{StaticResource MiniIconButton}"
+                            Click="LyricPlayButton_Click" ToolTip="播放 / 暂停">
+                        <TextBlock x:Name="LyricPlayGlyph" Text="&#xE768;" FontFamily="Segoe MDL2 Assets" FontSize="15"
+                                   Foreground="#FF55A2FF"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Button>
+                    <Button x:Name="LyricNextButton" Width="30" Height="26"
+                            Background="{DynamicResource ControlFillBrush}"
+                            Style="{StaticResource MiniIconButton}"
+                            Click="LyricNextButton_Click" ToolTip="下一首">
+                        <TextBlock Text="&#xE893;" FontFamily="Segoe MDL2 Assets" FontSize="13"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Button>
+                </StackPanel>
+            </Grid>
 
             <!-- 四边伸缩不再用角落 Thumb 了。
                  WindowStyle=None + AllowsTransparency=True 时 WindowChrome 不生效，
@@ -208,5 +268,6 @@
                  比 Thumb 好的地方：四条边都能拉，而且边缘不需要常驻一个
                  看得见的把手（那个把手在穿透态还容易被误点）。 -->
         </Grid>
-    </Border>
+        </Border>
+    </Grid>
 </Window>

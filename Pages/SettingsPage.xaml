@@ -15,14 +15,15 @@
         <!-- 标签到输入框的间距也统一，之前有 12 有 8。 -->
         <Thickness x:Key="FieldGap">12,0,0,0</Thickness>
     </UserControl.Resources>
-    <ScrollViewer VerticalScrollBarVisibility="Auto">
+    <ScrollViewer x:Name="SettingsScroll" VerticalScrollBarVisibility="Auto"
+                ScrollChanged="SettingsScroll_ScrollChanged">
         <StackPanel MaxWidth="820" HorizontalAlignment="Left" Margin="0,0,10,10">
             <!-- 标题底下那行说明去掉了 -->
             <TextBlock Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_title]}"
                        FontSize="28" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,16"/>
 
             <!-- 程序颜色主题 -->
-            <Border Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="20" Margin="0,0,0,16">
+            <Border x:Name="ThemeSection" Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="20" Margin="0,0,0,16">
                 <StackPanel>
                     <TextBlock Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_theme_title]}"
                                FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,12"/>
@@ -32,9 +33,12 @@
                                    VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}"/>
                         <ComboBox x:Name="ThemeModeCombo" Width="{StaticResource FieldWidth}" Margin="{StaticResource FieldGap}"
                                   VerticalContentAlignment="Center" SelectionChanged="ThemeModeCombo_SelectionChanged">
-                            <ComboBoxItem Content="深色" Tag="dark"/>
-                            <ComboBoxItem Content="浅色" Tag="light"/>
-                            <ComboBoxItem Content="跟随系统" Tag="system"/>
+                            <!-- 三项的文字原来直接写死成中文，切到英文/日文界面时
+                                 这里还是「深色/浅色/跟随系统」。Tag 才是真正存进
+                                 设置里的值，显示文字由 RefreshThemeOptionText 刷。 -->
+                            <ComboBoxItem x:Name="ThemeModeDarkItem" Content="深色" Tag="dark"/>
+                            <ComboBoxItem x:Name="ThemeModeLightItem" Content="浅色" Tag="light"/>
+                            <ComboBoxItem x:Name="ThemeModeSystemItem" Content="跟随系统" Tag="system"/>
                         </ComboBox>
                     </StackPanel>
 
@@ -46,17 +50,20 @@
                             <!-- 墨黑放第一位：它就是默认强调色（AppSettings.AccentColor
                                  的默认值，也是 UpdateThemeUI 里 idx=0 的兜底）。
                                  放第一位是为了「默认项永远在下拉最上面」，不用在八个里找。
-                                 注释也跟着 纯白 一起留在原处，别让它跟错条目。 -->
-                            <ComboBoxItem Content="墨黑" Tag="#1C1C1C"/>
-                            <ComboBoxItem Content="天蓝" Tag="#3C8CFF"/>
-                            <ComboBoxItem Content="青碧" Tag="#00B3A4"/>
-                            <ComboBoxItem Content="松绿" Tag="#3BA55D"/>
-                            <ComboBoxItem Content="暖橙" Tag="#F27B13"/>
-                            <ComboBoxItem Content="玫粉" Tag="#F25E9B"/>
-                            <ComboBoxItem Content="紫罗兰" Tag="#8A6CFF"/>
+                                 深色主题下选它以前整个界面等于全黑 —— #1C1C1C 和背景
+                                 只差一点点，播放键和进度条直接看不见。
+                                 现在 ReadableAccent 会把它往白里提，色相不变。
+                                 浅色下的纯白同理，会被往黑里压。 -->
+                            <ComboBoxItem x:Name="AccentInkItem" Content="墨黑" Tag="#1C1C1C"/>
+                            <ComboBoxItem x:Name="AccentSkyItem" Content="天蓝" Tag="#3C8CFF"/>
+                            <ComboBoxItem x:Name="AccentTealItem" Content="青碧" Tag="#00B3A4"/>
+                            <ComboBoxItem x:Name="AccentPineItem" Content="松绿" Tag="#3BA55D"/>
+                            <ComboBoxItem x:Name="AccentAmberItem" Content="暖橙" Tag="#F27B13"/>
+                            <ComboBoxItem x:Name="AccentRoseItem" Content="玫粉" Tag="#F25E9B"/>
+                            <ComboBoxItem x:Name="AccentVioletItem" Content="紫罗兰" Tag="#8A6CFF"/>
                             <!-- 黑白两档。按钮上的字色会跟着强调色亮度自动翻成近黑/近白，
                                  所以纯白也不会变成白底白字。 -->
-                            <ComboBoxItem Content="纯白" Tag="#FFFFFF"/>
+                            <ComboBoxItem x:Name="AccentWhiteItem" Content="纯白" Tag="#FFFFFF"/>
                         </ComboBox>
                     </StackPanel>
 
@@ -68,53 +75,135 @@
                         <TextBlock x:Name="ThemeDarknessText" VerticalAlignment="Center" FontSize="13" MinWidth="40" Foreground="{DynamicResource TextSecondaryBrush}"/>
                     </StackPanel>
 
-                    <TextBlock Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_theme_sub]}"
-                               FontSize="11.5" Foreground="{DynamicResource TextTertiaryBrush}" TextWrapping="Wrap"/>
-                </StackPanel>
-            </Border>
-
-            <!-- 歌词外观。独立成卡而不是塞进上面那张主题卡：
-                 上面那张改的是整个程序的取色/背景，这一项只管桌面歌词那一个窗口，
-                 混在一起会让人以为改字族会连带换主界面字体。 -->
-            <Border Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="20" Margin="0,0,0,16">
-                <StackPanel>
-                    <TextBlock x:Name="LyricFontTitleText" FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,12"/>
-
+                    <!-- 背景不透明度原来在下面「背景」那张卡里。两个滑块一前一后分开放，
+                     改一个要滚到另一张卡才看得到另一个压的是哪一层，
+                     干脆并到「背景变暗」正下方：上面这条压背景素材的明暗，
+                     下面这条压背景素材本身，一屏看完。 -->
                     <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
-                        <TextBlock x:Name="LyricFontLabelText" VerticalAlignment="Center" FontSize="13"
-                                   Foreground="{DynamicResource TextPrimaryBrush}"/>
-                        <ComboBox x:Name="LyricFontCombo" Width="{StaticResource FieldWidth}" Margin="{StaticResource FieldGap}"
-                                  VerticalContentAlignment="Center"
-                                  SelectionChanged="LyricFontCombo_SelectionChanged"/>
+                        <TextBlock x:Name="BgOpacityLabel" VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                        <Slider x:Name="BgOpacitySlider" Width="260" Minimum="0" Maximum="1" VerticalAlignment="Center"
+                                Margin="12,0" ValueChanged="BgOpacitySlider_ValueChanged"/>
+                        <TextBlock x:Name="BgOpacityText" VerticalAlignment="Center" FontSize="13" MinWidth="40" Foreground="{DynamicResource TextSecondaryBrush}"/>
                     </StackPanel>
+                    <!-- 背景：从页面底部那张独立卡并进了「程序颜色主题」，
+                         和背景变暗/不透明度两个滑块同处一卡，一屏看完。 -->
+                    <Border Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="20" Margin="16,16,0,0">
+                        <StackPanel>
+                            <TextBlock Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_bg_title]}"
+                                       FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,12"/>
 
-                    <TextBlock x:Name="LyricFontHintText" FontSize="11.5"
-                               Foreground="{DynamicResource TextTertiaryBrush}" TextWrapping="Wrap"/>
+                            <DockPanel Margin="0,0,0,12">
+                                <ComboBox x:Name="BgTypeCombo" DockPanel.Dock="Left" Width="{StaticResource FieldWidth}" Margin="0,0,12,0"
+                                          VerticalContentAlignment="Center" SelectionChanged="BgTypeCombo_SelectionChanged">
+                                    <ComboBoxItem Content="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_bg_pic]}"/>
+                                    <ComboBoxItem Content="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_bg_video]}"/>
+                                </ComboBox>
+                                <Button x:Name="ChooseBgButton" Padding="14,8" DockPanel.Dock="Right"
+                                        Style="{StaticResource AccentButtonStyle}" Click="ChooseBgButton_Click"/>
+                                <TextBlock x:Name="BgPathText" VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextSecondaryBrush}"
+                                           TextTrimming="CharacterEllipsis" Margin="12,0,12,0"/>
+                            </DockPanel>
+
+                            <!-- 「背景明暗」原来在这里也放过一个滑块，和上面「程序颜色主题」
+                                 那张卡里的 ThemeDarknessSlider 绑的是同一个
+                                 BackgroundDarkness。两个滑块、两个标签（一个写「背景变暗」
+                                 一个写「背景明暗」）、两张卡，改一边另一边跟着跳。
+                                 现在只留主题卡里那一个，压的就是背景素材本身，
+                                 这里专心管「底图不透明度」和「摆动」。 -->
+
+                            <!-- 摆动的两个开关（轻微摆动 / 摆动幅度）都撤了：
+                                 背景那层位移本来就没人真拿它干什么，开着还占地方，
+                                 摆幅那一条更是「先勾开关才生效」的两级控制，
+                                 一屏里留个孤零零的滑块更费解。摆动代码还留着，
+                                 直接把设置里的值当成关的即可，见 SettingsManager 的迁移。 -->
+
+                            <!-- 「背景视频轮播目录」和「视频背景音量」两行已撤：
+                                 目录轮播容易让人以为能把整个文件夹当背景轮着放，实际用起来
+                                 只想给当前的背景视频调个音量。现在背景视频用上面的
+                                 「选择背景图像」直接挑一段（类型选视频时过滤视频文件），
+                                 音量并入底栏音量的混音浮层，和主音量挨着调。 -->
+                        </StackPanel>
+                    </Border>
                 </StackPanel>
             </Border>
+
+            <!-- 歌词设置（字体 + 两种歌词颜色）并到下面「歌词动画」那张卡的
+                 末尾去了：它们改的都是同一个窗口的同一批文字，
+                 拆成两张卡会让人以为字体和颜色是两套互不相干的东西。 -->
 
             <!-- 通用设置：系统行为 + 全局快捷键 + 搜索提示词 + 界面语言 -->
             <Border Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="20" Margin="0,0,0,16">
                 <StackPanel>
                     <TextBlock x:Name="BehaviorTitleText" FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,12"/>
 
-                    <CheckBox x:Name="AutoStartCheckBox" FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,10"
+<CheckBox x:Name="AutoStartCheckBox" FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,10"
                               Checked="AutoStartCheckBox_Checked" Unchecked="AutoStartCheckBox_Unchecked"/>
 
-                    <CheckBox x:Name="StartTrayCheckBox" FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,10"
-                              Checked="StartTrayCheckBox_Checked" Unchecked="StartTrayCheckBox_Unchecked"/>
+                    <!-- 「启动时自动隐藏到托盘」已按要求删掉。
+                         注意它以前还顺带接管了两处别的行为，一并去掉了：
+                           1. 最小化按钮 —— 现在统一最小化到任务栏，不再藏进托盘
+                           2. 关闭按钮 —— 以前它开着的时候关闭键等于退出按钮，
+                              按 X 只会缩到托盘、永远退不出来（那个存档里就是 true）。
+                              现在关闭键只由「关闭时」那一项决定。
+                         留着这个选项的话，这个存档会让程序启动就完全看不见窗口、
+                         又没有地方能把它叫回来，所以是连设置项带行为一起删的。 -->
 
-                    <!-- 托盘图标常驻：和上面「启动时最小化到托盘」分开控制 -->
+<!-- 关闭图标常驻，开启后托盘才有退出入口。 -->
                     <CheckBox x:Name="ShowTrayIconCheckBox" FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,10"
                               Checked="ShowTrayIconCheckBox_Checked" Unchecked="ShowTrayIconCheckBox_Unchecked"/>
 
-                    <CheckBox x:Name="StartAnimCheckBox" FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,10"
-                              Checked="StartAnimCheckBox_Checked" Unchecked="StartAnimCheckBox_Unchecked"/>
+                    <!-- 「播放定位小球 / 界面音效 / 最小化时释放物理内存」三个开关行已按
+                         产品决策撤掉：三项全部恒开（SettingsManager.Load 强制覆盖旧配置），
+                         行为代码不再判断开关，以后想恢复界面把 Load 里的强制覆盖删掉即可。 -->
+
+                    <!-- 主动探测 VIP 音乐：默认关（不额外发请求，点了被拒才打标）。
+                         开启后搜索结果/收藏夹加载完在后台逐条实测，提前把 VIP 标签打好/误标撤掉。 -->
+                    <CheckBox x:Name="VipProbeCheckBox" FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,10"
+                              Checked="VipProbeCheckBox_Checked" Unchecked="VipProbeCheckBox_Unchecked"/>
+
+                    <!-- 显示封面图片：默认开。这是**全部封面位**的总闸（列表行、
+                         播放条封面、SMTC 缩略图、沉浸页、歌单卡片），关掉后
+                         CoverLoader 入口统一短路：网络请求全停、一切封面位显示
+                         纯色占位，磁盘缓存保留。列表封面曾是「行数 × 1」的
+                         网络请求 + 解码 + 内存的大头，慢网/低端机关掉立竿见影。 -->
+                    <CheckBox x:Name="ShowCoversCheckBox" FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,2"
+                              Checked="ShowCoversCheckBox_Checked" Unchecked="ShowCoversCheckBox_Unchecked"/>
+                    <TextBlock x:Name="ShowCoversHintText" FontSize="11.5" Opacity="0.75"
+                               Foreground="{DynamicResource TextTertiaryBrush}" TextWrapping="Wrap"
+                               Margin="16,0,0,10"/>
+
+                    <!-- 内存守护：工作集连续两次超过阈值自动释放一次。
+                         阈值下限 150MB（滑块写死），上限 4096MB；
+                         设置改完由 MemoryGuard 下一个采样周期现读，不用重启。 -->
+                    <CheckBox x:Name="AutoMemReleaseCheckBox" FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,2"
+                              Checked="AutoMemReleaseCheckBox_Checked" Unchecked="AutoMemReleaseCheckBox_Unchecked"/>
+                    <StackPanel Orientation="Horizontal" Margin="16,2,0,2">
+                        <TextBlock x:Name="AutoMemThresholdLabel" VerticalAlignment="Center" FontSize="13"
+                                   Foreground="{DynamicResource TextPrimaryBrush}"/>
+                        <Slider x:Name="AutoMemThresholdSlider" Width="220" Minimum="150" Maximum="4096"
+                                TickFrequency="50" IsSnapToTickEnabled="True" VerticalAlignment="Center"
+                                Margin="12,0" ValueChanged="AutoMemThresholdSlider_ValueChanged"/>
+                        <TextBlock x:Name="AutoMemThresholdText" VerticalAlignment="Center" FontSize="13" MinWidth="72"
+                                   Foreground="{DynamicResource TextSecondaryBrush}"/>
+                    </StackPanel>
+                    <TextBlock x:Name="AutoMemHintText" FontSize="11.5" Opacity="0.75"
+                               Foreground="{DynamicResource TextTertiaryBrush}" TextWrapping="Wrap"
+                               Margin="16,0,0,10"/>
+
+                    <!-- 启动时自动播放：默认关。开着时冷启动按上次播放上下文恢复列表，
+                         从里面随机挑一首开播（失败静默降级为不播）。 -->
+                    <CheckBox x:Name="StartupAutoPlayCheckBox" FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,2"
+                              Checked="StartupAutoPlayCheckBox_Checked" Unchecked="StartupAutoPlayCheckBox_Unchecked"/>
+                    <TextBlock x:Name="StartupAutoPlayHintText" FontSize="11.5" Opacity="0.75"
+                               Foreground="{DynamicResource TextTertiaryBrush}" TextWrapping="Wrap"
+                               Margin="16,0,0,10"/>
 
                     <CheckBox x:Name="DebugModeCheckBox" FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,12,4"
                               Checked="DebugModeCheckBox_Checked" Unchecked="DebugModeCheckBox_Unchecked"/>
 
-                    <Border BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="0,1,0,0" Padding="0,12,0,0" Margin="0,12,0,0">
+                    <!-- 最近播放块已移到「调试与路径」正上方，独立成卡。 -->
+
+                    <Border x:Name="HotkeySection" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="0,1,0,0" Padding="0,12,0,0" Margin="0,12,0,0">
                         <StackPanel>
                             <TextBlock x:Name="HotkeyTitleText" FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,4"/>
                             <TextBlock x:Name="HotkeyHintText" FontSize="12" Foreground="{DynamicResource TextTertiaryBrush}" TextWrapping="Wrap" Margin="0,0,0,10"/>
@@ -124,11 +213,39 @@
 
                     <Border BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="0,1,0,0" Padding="0,12,0,0" Margin="0,8,0,0">
                         <StackPanel>
-                            <TextBlock x:Name="HobbyTitle" FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,4"/>
+                            <TextBlock Text="搜索与歌词外观" FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,4"/>
+                        <!-- 空关键词点搜索框时，在线建议先试哪个平台。
+                             只改尝试顺序：首选源没结果仍会顺次落到其余源。 -->
+                        <StackPanel Orientation="Horizontal" Margin="0,4,0,10">
+                            <TextBlock x:Name="FirstPlatformLabel" FontSize="13" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center"
+                                       Margin="0,0,14,0"/>
+                            <ComboBox x:Name="FirstPlatformCombo" Width="{StaticResource FieldWidth}"
+                                      VerticalContentAlignment="Center"
+                                      SelectionChanged="FirstPlatformCombo_SelectionChanged">
+                                <ComboBoxItem x:Name="FirstPlatformDefaultItem" Tag=""/>
+                                <ComboBoxItem x:Name="FirstPlatformNeteaseItem" Tag="netease"/>
+                                <ComboBoxItem x:Name="FirstPlatformQqItem" Tag="qq"/>
+                                <ComboBoxItem x:Name="FirstPlatformKugouItem" Tag="kugou"/>
+                            </ComboBox>
+                        </StackPanel>
+                        <TextBlock x:Name="HobbyTitle" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,10,0,4"/>
                             <TextBlock x:Name="HobbySub" FontSize="12" Foreground="{DynamicResource TextTertiaryBrush}" TextWrapping="Wrap" Margin="0,0,0,10"/>
+                            <!-- 敲完一个词按空格/回车就包成一张标签卡：爱好是一组一组的词，
+                                 卡片比一长串逗号分隔的文本好读也好改。点卡片把词撤回来改，
+                                 框里空着按退格把最后一张拿回来。 -->
+                            <Border x:Name="HobbyChipBar" CornerRadius="4" Padding="4,3" Margin="0,0,0,8"
+                                    BorderBrush="{DynamicResource ControlStrokeBrush}" BorderThickness="1"
+                                    Visibility="Collapsed">
+                                <WrapPanel x:Name="HobbyChipHost" Orientation="Horizontal"/>
+                            </Border>
                             <TextBox x:Name="HobbyBox" Padding="10,8" FontSize="13" TextWrapping="Wrap"
-                                     AcceptsReturn="True" MaxHeight="140" Margin="0,0,0,10"
-                                     VerticalScrollBarVisibility="Auto"/>
+                                     AcceptsReturn="False" MaxHeight="140" Margin="0,0,0,6"
+                                     VerticalScrollBarVisibility="Auto"
+                                     PreviewKeyDown="HobbyBox_PreviewKeyDown" LostFocus="HobbyBox_LostFocus"/>
+                            <TextBlock x:Name="HobbyChipHint" FontSize="11.5" Opacity="0.75"
+                                       Foreground="{DynamicResource TextTertiaryBrush}" TextWrapping="Wrap"
+                                       Margin="0,0,0,10"/>
                             <Button x:Name="HobbySaveButton" Padding="14,7" HorizontalAlignment="Left"
                                     Style="{StaticResource AccentButtonStyle}"
                                     Click="HobbySaveButton_Click"/>
@@ -139,16 +256,48 @@
                     <!-- 歌词动画 + 歌词颜色。
                          这两块挨着放，因为它们改的是同一个东西：歌词窗当前行长什么样。
                          模板放前面：先决定「怎么动」，再决定「什么颜色动」。 -->
-                    <Border BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="0,1,0,0" Padding="0,12,0,0" Margin="0,8,0,0">
+                    <Border x:Name="SearchLyricSection" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="0,1,0,0" Padding="0,12,0,0" Margin="0,8,0,0">
                         <StackPanel>
                             <TextBlock x:Name="LyricAnimTitle" FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,4"/>
                             <TextBlock x:Name="LyricAnimHintText" FontSize="12" Foreground="{DynamicResource TextTertiaryBrush}" TextWrapping="Wrap" Margin="0,0,0,10"/>
 
                             <ComboBox x:Name="LyricAnimCombo" Width="{StaticResource FieldWidth}" HorizontalAlignment="Left"
                                       VerticalContentAlignment="Center" Margin="0,0,0,8"
-                                      DisplayMemberPath="Display" SelectionChanged="LyricAnimCombo_SelectionChanged"/>
+                                      SelectionChanged="LyricAnimCombo_SelectionChanged">
+                                <ComboBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding Display}" TextTrimming="CharacterEllipsis"/>
+                                    </DataTemplate>
+                                </ComboBox.ItemTemplate>
+                            </ComboBox>
                             <TextBlock x:Name="LyricAnimDescText" FontSize="12" Foreground="{DynamicResource TextTertiaryBrush}"
                                        TextWrapping="Wrap" Margin="0,0,0,12"/>
+
+                            <!-- 歌词颜色渲染速度：卡拉OK擦除填色的窗口时长。
+                                 滑块值直接写进 Lyrics.ProgressOf，下面这块预览按同一套
+                                 算法（整句 3.2 秒）实时演示颜色扫过去的速度。 -->
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                                <TextBlock x:Name="LyricRevealTitleText" VerticalAlignment="Center" FontSize="13"
+                                           Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                <Slider x:Name="LyricRevealSlider" Width="200" Minimum="400" Maximum="5000" VerticalAlignment="Center"
+                                        Margin="12,0" TickFrequency="100" IsSnapToTickEnabled="True"
+                                        ValueChanged="LyricRevealSlider_ValueChanged"/>
+                                <TextBlock x:Name="LyricRevealValueText" VerticalAlignment="Center" FontSize="13" MinWidth="56"
+                                           Foreground="{DynamicResource TextSecondaryBrush}"/>
+                            </StackPanel>
+                            <TextBlock x:Name="LyricRevealHintText" FontSize="11.5" Foreground="{DynamicResource TextTertiaryBrush}"
+                                       TextWrapping="Wrap" Margin="0,0,0,8"/>
+                            <Border Height="76" CornerRadius="8" ClipToBounds="True" Margin="0,0,0,12"
+                                    Background="{DynamicResource ControlFillBrush}" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1">
+                                <Grid HorizontalAlignment="Center" VerticalAlignment="Center">
+                                    <TextBlock x:Name="LyricRevealPreviewBase" FontSize="17" FontWeight="SemiBold"
+                                               Foreground="{DynamicResource TextTertiaryBrush}" Text="把心事都交给晚风"/>
+                                    <Border x:Name="LyricRevealPreviewClipHost" ClipToBounds="True">
+                                        <TextBlock x:Name="LyricRevealPreviewLit" FontSize="17" FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource TextPrimaryBrush}" Text="把心事都交给晚风"/>
+                                    </Border>
+                                </Grid>
+                            </Border>
 
                             <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
                                 <TextBlock x:Name="LyricAnimFolderTitle" VerticalAlignment="Center" FontSize="13"
@@ -165,29 +314,76 @@
                             <TextBlock x:Name="LyricAnimFolderHintText" FontSize="12" Foreground="{DynamicResource TextTertiaryBrush}"
                                        TextWrapping="Wrap" Margin="0,0,0,12"/>
 
+                            <!-- 歌词设置 = 字体 + 歌词颜色 + 已唱歌词颜色。
+                                 原来「歌词外观」是一张独立的卡、只有字体下拉，
+                                 「歌词颜色」是这张动画卡末尾的一个子区块，
+                                 两者改的是同一批文字却被拆成两处，
+                                 找颜色要翻到卡片最底下、找字体要翻回上面一张卡。
+                                 现在合成一块。 -->
                             <Border BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="0,1,0,0" Padding="0,12,0,0" Margin="0,0,0,0">
                                 <StackPanel>
-                                    <TextBlock x:Name="LyricColorTitle" FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,4"/>
-                                    <TextBlock x:Name="LyricColorHintText" FontSize="12" Foreground="{DynamicResource TextTertiaryBrush}" TextWrapping="Wrap" Margin="0,0,0,10"/>
-                                    <StackPanel Orientation="Horizontal">
-                                        <TextBlock x:Name="LyricColorLabel" VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,12,0"/>
-                                        <TextBox x:Name="LyricColorBox" Width="180" Padding="8,6" FontSize="12" FontFamily="Consolas"
-                                                 VerticalContentAlignment="Center" LostFocus="LyricColorBox_LostFocus"
-                                                 KeyDown="LyricColorBox_KeyDown" Margin="0,0,8,0"/>
-                                        <Button x:Name="LyricColorApplyButton" Padding="12,6" Margin="0,0,6,0"
-                                                Style="{StaticResource AccentButtonStyle}"
-                                                Click="LyricColorApplyButton_Click"/>
-                                        <Button x:Name="LyricColorResetButton" Padding="12,6"
-                                                Style="{StaticResource GhostButtonStyle}"
-                                                Click="LyricColorResetButton_Click"/>
+                                    <!-- 字体（保留） -->
+                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                                        <TextBlock x:Name="LyricFontLabelText" VerticalAlignment="Center" FontSize="13"
+                                                   Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                        <ComboBox x:Name="LyricFontCombo" Width="{StaticResource FieldWidth}" Margin="{StaticResource FieldGap}"
+                                                  VerticalContentAlignment="Center"
+                                                  SelectionChanged="LyricFontCombo_SelectionChanged"/>
                                     </StackPanel>
-                                    <TextBlock x:Name="LyricColorPreview" FontSize="26" FontWeight="SemiBold"
-                                               Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,12,0,0"/>
+
+                                    <!-- 三个歌词颜色并排成一行。
+                                         每组只留：四字选项名 + A（跟随主题）+ 自定义（调色盘）。
+                                         预设色板、说明句、HEX 输入框、应用/恢复主题按钮全部撤掉：
+                                         自定义按钮本身就是调色盘入口，选完立刻生效并把自己的
+                                         背景染成选中色，不需要再点一次「应用」。
+                                         HEX 输入框保留为 Collapsed：ColorSlot 仍用它当当前值的载体，
+                                         但不占界面空间、也不让用户手打色值。 -->
+                                    <!-- 用 WrapPanel 而不是均分宽度的 Grid：设置页内容区比
+                                         窗口可视区宽，均分会把第三列推到屏幕外被裁掉。
+                                         每组固定 160 宽（DPI 1.5 下约 240 物理像素），
+                                         三列仍能在一排里完整放下；窗口窄时自动折行，
+                                         任何情况下三个选项都不会消失。 -->
+                                    <WrapPanel Margin="0,10,0,0">
+                                        <StackPanel Width="160" Margin="0,0,8,8">
+                                            <TextBlock x:Name="LyricColorLabel" FontSize="13" FontWeight="SemiBold"
+                                                       Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,8"/>
+                                            <WrapPanel x:Name="LyricColorSwatches"/>
+                                            <TextBox x:Name="LyricColorBox" Visibility="Collapsed"
+                                                     LostFocus="LyricColorBox_LostFocus" KeyDown="LyricColorBox_KeyDown"/>
+                                        </StackPanel>
+                                        <StackPanel Width="160" Margin="0,0,8,8">
+                                            <TextBlock x:Name="LyricSungLabel" FontSize="13" FontWeight="SemiBold"
+                                                       Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,8"/>
+                                            <WrapPanel x:Name="LyricSungSwatches"/>
+                                            <TextBox x:Name="LyricSungBox" Visibility="Collapsed"
+                                                     LostFocus="LyricSungBox_LostFocus" KeyDown="LyricSungBox_KeyDown"/>
+                                        </StackPanel>
+                                        <StackPanel Width="160" Margin="0,0,0,8">
+                                            <TextBlock x:Name="LyricTranslateLabel" FontSize="13" FontWeight="SemiBold"
+                                                       Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,8"/>
+                                            <WrapPanel x:Name="LyricTranslateSwatches"/>
+                                            <TextBox x:Name="LyricTranslateBox" Visibility="Collapsed"
+                                                     LostFocus="LyricTranslateBox_LostFocus" KeyDown="LyricTranslateBox_KeyDown"/>
+                                        </StackPanel>
+                                    </WrapPanel>
+
+                                    <!-- 三色同屏预览：左半句已唱色、右半句未唱色、下一行译文色。 -->
+                                    <Border BorderBrush="{DynamicResource CardBorderBrush}"
+                                            BorderThickness="1" CornerRadius="10"
+                                            Padding="14,12" Margin="0,16,0,0"
+                                            Background="{DynamicResource SubtleFillBrush}">
+                                        <StackPanel>
+                                            <TextBlock x:Name="LyricPreviewMain" FontSize="24" FontWeight="SemiBold"/>
+                                            <TextBlock x:Name="LyricPreviewSub" FontSize="13" Margin="0,6,0,0"
+                                                       Foreground="{DynamicResource TextTertiaryBrush}"
+                                                       TextWrapping="Wrap"/>
+                                        </StackPanel>
+                                    </Border>
                                 </StackPanel>
                             </Border>
                         </StackPanel>
                     </Border>
-                    <Border BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="0,1,0,0" Padding="0,12,0,0" Margin="0,8,0,0">
+                    <Border x:Name="LanguageSection" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="0,1,0,0" Padding="0,12,0,0" Margin="0,8,0,0">
                         <StackPanel Orientation="Horizontal">
                             <TextBlock Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_lang_title]}"
                                        VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}"/>
@@ -205,75 +401,38 @@
                 </StackPanel>
             </Border>
 
-            <!-- 账号：网易云 / QQ / 酷狗 一行，窄时换行 -->
-            <WrapPanel>
-                <Border Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="14" Margin="0,0,12,12" MinWidth="250">
-                    <StackPanel>
-                        <TextBlock x:Name="NeteaseCookieTitle" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,8"/>
-                        <TextBox x:Name="NeteaseCookieBox" Padding="8,6" FontSize="12" FontFamily="Consolas"
-                                 TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Height="54" Margin="0,0,0,8"/>
-                        <WrapPanel>
-                            <Button x:Name="NeteaseBrowserLoginButton" Padding="10,6" Margin="0,0,6,6"
-                                    Style="{StaticResource AccentButtonStyle}"
-                                    Click="NeteaseBrowserLoginButton_Click"/>
-                            <Button x:Name="NeteaseFetchCookieButton" Padding="10,6" Margin="0,0,6,6"
-                                    Style="{StaticResource GhostButtonStyle}"
-                                    Click="NeteaseFetchCookieButton_Click"/>
-                            <Button x:Name="NeteaseCookieSaveButton" Padding="10,6" Margin="0,0,6,6"
-                                    Style="{StaticResource AccentButtonStyle}"
-                                    Click="NeteaseCookieSaveButton_Click"/>
-                            <Button x:Name="NeteaseCookieClearButton" Padding="10,6"
-                                    Style="{StaticResource GhostButtonStyle}"
-                                    Click="NeteaseCookieClearButton_Click"/>
-                        </WrapPanel>
+            <!-- 最近播放：从「通用设置」里拎出来，单独成卡，放在「调试与路径」正上方。 -->
+            <Border x:Name="RecentSection" Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="20" Margin="0,0,0,16">
+                <StackPanel>
+                    <TextBlock x:Name="RecentTitleText" FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,10"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                        <TextBlock x:Name="RecentKeepDaysLabel" FontSize="13" FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center"
+                                   Margin="0,0,14,0"/>
+                        <TextBox x:Name="RecentKeepDaysBox" Width="72" Padding="8,5" FontSize="13"
+                                 VerticalContentAlignment="Center"
+                                 LostFocus="RecentKeepDaysBox_LostFocus" KeyDown="RecentKeepDaysBox_KeyDown"/>
+                        <Button x:Name="RecentCleanupButton" Padding="12,6" Margin="12,0,0,0"
+                                Style="{StaticResource GhostButtonStyle}" Click="RecentCleanupButton_Click"/>
                     </StackPanel>
-                </Border>
-
-                <Border Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="14" Margin="0,0,12,12" MinWidth="250">
-                    <StackPanel>
-                        <TextBlock x:Name="QqCookieTitle" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,8"/>
-                        <TextBox x:Name="QqCookieBox" Padding="8,6" FontSize="12" FontFamily="Consolas"
-                                 TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Height="54" Margin="0,0,0,8"/>
-                        <WrapPanel>
-                            <Button x:Name="QqBrowserLoginButton" Padding="10,6" Margin="0,0,6,6"
-                                    Style="{StaticResource AccentButtonStyle}"
-                                    Click="QqBrowserLoginButton_Click"/>
-                            <Button x:Name="QqFetchCookieButton" Padding="10,6" Margin="0,0,6,6"
-                                    Style="{StaticResource GhostButtonStyle}"
-                                    Click="QqFetchCookieButton_Click"/>
-                            <Button x:Name="QqCookieSaveButton" Padding="10,6" Margin="0,0,6,6"
-                                    Style="{StaticResource AccentButtonStyle}"
-                                    Click="QqCookieSaveButton_Click"/>
-                            <Button x:Name="QqCookieClearButton" Padding="10,6"
-                                    Style="{StaticResource GhostButtonStyle}"
-                                    Click="QqCookieClearButton_Click"/>
-                        </WrapPanel>
+                    <TextBlock x:Name="RecentKeepDaysHint" FontSize="11.5" Opacity="0.75"
+                               Foreground="{DynamicResource TextTertiaryBrush}" TextWrapping="Wrap" Margin="0,0,0,10"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                        <TextBlock x:Name="RecentMaxCountLabel" FontSize="13" FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextPrimaryBrush}" VerticalAlignment="Center"
+                                   Margin="0,0,14,0"/>
+                        <TextBox x:Name="RecentMaxCountBox" Width="72" Padding="8,5" FontSize="13"
+                                 VerticalContentAlignment="Center"
+                                 LostFocus="RecentMaxCountBox_LostFocus" KeyDown="RecentMaxCountBox_KeyDown"/>
                     </StackPanel>
-                </Border>
+                    <TextBlock x:Name="RecentMaxCountHint" FontSize="11.5" Opacity="0.75"
+                               Foreground="{DynamicResource TextTertiaryBrush}" TextWrapping="Wrap"/>
+                </StackPanel>
+            </Border>
 
-                <Border Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="14" Margin="0,0,12,12" MinWidth="250">
-                    <StackPanel>
-                        <TextBlock x:Name="KugouCookieTitle" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,8"/>
-                        <DockPanel Margin="0,0,0,8">
-                            <TextBlock x:Name="KugouNickLabel" Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_kugou_nick]}"
-                                       VerticalAlignment="Center" FontSize="12.5" Foreground="{DynamicResource TextPrimaryBrush}"/>
-                            <TextBox x:Name="KugouNickBox" Padding="8,6" FontSize="12.5" Margin="10,0,0,0"/>
-                        </DockPanel>
-                        <TextBox x:Name="KugouCookieBox" Padding="8,6" FontSize="12" FontFamily="Consolas"
-                                 TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Height="54" Margin="0,0,0,8"/>
-                        <WrapPanel>
-                            <Button x:Name="KugouCookieSaveButton" Padding="10,6" Margin="0,0,6,6"
-                                    Style="{StaticResource AccentButtonStyle}"
-                                    Click="KugouCookieSaveButton_Click"/>
-                            <Button x:Name="KugouCookieClearButton" Padding="10,6"
-                                    Style="{StaticResource GhostButtonStyle}"
-                                    Click="KugouCookieClearButton_Click"/>
-                        </WrapPanel>
-                    </StackPanel>
-                </Border>
-            </WrapPanel>
-
-            <Border Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="20" Margin="0,0,0,16">
+            <!-- 调试与路径：只在「调试模式」开着时显示（DebugMode=false 整块 Collapsed）。
+                 隐藏期间内存检测的 1s 刷新计时器一并停掉，省 CPU；开启再恢复。 -->
+            <Border x:Name="DebugSection" Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="20" Margin="0,0,0,16">
                 <StackPanel>
                     <TextBlock x:Name="DbgTitleText" FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,12"/>
 
@@ -291,144 +450,24 @@
                                 Style="{StaticResource GhostButtonStyle}"
                                 Click="DbgClearCacheButton_Click"/>
                     </WrapPanel>
-                </StackPanel>
-            </Border>
 
-            <!-- 背景（待排） -->
-            <Border Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="20" Margin="0,0,0,16">
-                <StackPanel>
-                    <TextBlock Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_bg_title]}"
-                               FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,12"/>
-
-                    <DockPanel Margin="0,0,0,12">
-                        <ComboBox x:Name="BgTypeCombo" DockPanel.Dock="Left" Width="{StaticResource FieldWidth}" Margin="0,0,12,0"
-                                  VerticalContentAlignment="Center" SelectionChanged="BgTypeCombo_SelectionChanged">
-                            <ComboBoxItem Content="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_bg_pic]}"/>
-                            <ComboBoxItem Content="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_bg_video]}"/>
-                        </ComboBox>
-                        <Button x:Name="ChooseBgButton" Padding="14,8" DockPanel.Dock="Right"
-                                Style="{StaticResource AccentButtonStyle}" Click="ChooseBgButton_Click"/>
-                        <TextBlock x:Name="BgPathText" VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextSecondaryBrush}"
-                                   TextTrimming="CharacterEllipsis" Margin="12,0,12,0"/>
-                    </DockPanel>
-
-                    <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
-                        <TextBlock Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_bg_darkness]}"
-                                   VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}"/>
-                        <Slider x:Name="BgDarknessSlider" Width="260" Minimum="0.1" Maximum="0.8" VerticalAlignment="Center"
-                                Margin="12,0" ValueChanged="BgDarknessSlider_ValueChanged"/>
-                        <TextBlock x:Name="BgDarknessText" VerticalAlignment="Center" FontSize="13" MinWidth="40" Foreground="{DynamicResource TextSecondaryBrush}"/>
-                    </StackPanel>
-
-                    <!-- 背景自身不透明度：和上面的「背景暗度」是两件事，这里压的是底图本身 -->
-                    <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
-                        <TextBlock x:Name="BgOpacityLabel" VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}"/>
-                        <Slider x:Name="BgOpacitySlider" Width="260" Minimum="0" Maximum="1" VerticalAlignment="Center"
-                                Margin="12,0" ValueChanged="BgOpacitySlider_ValueChanged"/>
-                        <TextBlock x:Name="BgOpacityText" VerticalAlignment="Center" FontSize="13" MinWidth="40" Foreground="{DynamicResource TextSecondaryBrush}"/>
-                    </StackPanel>
-
-                    <CheckBox x:Name="BgSwingCheckBox" Content="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_bg_swing]}"
-                              FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}"
-                              Checked="BgSwingCheckBox_Checked" Unchecked="BgSwingCheckBox_Unchecked"/>
-
-                    <!-- 摆动幅度：只在上面的摆动勾选时生效 -->
-                    <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
-                        <TextBlock x:Name="BgSwingAmpLabel" VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}"/>
-                        <Slider x:Name="BgSwingAmpSlider" Width="260" Minimum="0" Maximum="100" VerticalAlignment="Center"
-                                Margin="12,0" ValueChanged="BgSwingAmpSlider_ValueChanged"/>
-                        <TextBlock x:Name="BgSwingAmpText" VerticalAlignment="Center" FontSize="13" MinWidth="40" Foreground="{DynamicResource TextSecondaryBrush}"/>
-                    </StackPanel>
-
-                    <!-- 背景视频轮播目录：留空则用程序目录下 Assets\Backgrounds -->
-                    <DockPanel Margin="0,12,0,0">
-                        <Button x:Name="BgVideoFolderButton" DockPanel.Dock="Right" Padding="14,8"
-                                Style="{StaticResource GhostButtonStyle}"
-                                Content="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_bg_video_folder]}"
-                                Click="BgVideoFolderButton_Click"/>
-                        <TextBlock x:Name="BgVideoFolderText" VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextSecondaryBrush}"
-                                   TextTrimming="CharacterEllipsis" Margin="0,0,12,0"/>
-                    </DockPanel>
-
-                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                        <TextBlock x:Name="BgVideoVolLabel" VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextPrimaryBrush}"/>
-                        <Slider x:Name="BgVideoVolumeSlider" Width="260" Minimum="0" Maximum="1" VerticalAlignment="Center"
-                                Margin="12,0" ValueChanged="BgVideoVolumeSlider_ValueChanged"/>
-                        <TextBlock x:Name="BgVideoVolText" VerticalAlignment="Center" FontSize="13" MinWidth="40" Foreground="{DynamicResource TextSecondaryBrush}"/>
+                    <!-- 内存检测区：排查「搜索音乐页内存上涨」这类问题时用。
+                         每秒刷一行工作集/私有字节/托管堆 + 封面缓存统计 + 行容器数，
+                         数据全部来自 CoverLoader.GetStats() / TrackRows.GetRowStats()，
+                         和日志里的「封面诊断」同一套口径，能直接对着日志看趋势。
+                         「立即释放」与托盘驻留、底栏释放键共用 MemoryRelease.ReleaseNow。 -->
+                    <StackPanel Margin="0,4,0,0">
+                        <TextBlock x:Name="DbgMemTitle" FontSize="13" FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextPrimaryBrush}"/>
+                        <TextBlock x:Name="DbgMemText" Margin="0,6,0,0" FontFamily="Consolas" FontSize="12"
+                                   LineHeight="18" Foreground="{DynamicResource TextSecondaryBrush}" TextWrapping="Wrap"/>
+                        <Button x:Name="DbgMemReleaseButton" Padding="14,8" Margin="0,10,0,0"
+                                HorizontalAlignment="Left" Style="{StaticResource GhostButtonStyle}"
+                                Click="DbgMemReleaseButton_Click"/>
                     </StackPanel>
                 </StackPanel>
             </Border>
 
-            <!-- B站账号（BBDown）待排 -->
-            <Border Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="20" Margin="0,0,0,16">
-                <StackPanel>
-                    <TextBlock Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_bili_title]}"
-                               FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,8"/>
-
-                    <DockPanel Margin="0,4,0,10">
-                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-                            <Button x:Name="BiliRefreshButton" Margin="8,0,0,0" Padding="12,7"
-                                    Style="{StaticResource GhostButtonStyle}"
-                                    Content="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_bili_refresh]}"
-                                    Click="BiliRefreshButton_Click"/>
-                            <Button x:Name="BiliDeleteButton" Margin="8,0,0,0" Padding="12,7"
-                                    Style="{StaticResource GhostButtonStyle}"
-                                    Content="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_bili_delete]}"
-                                    Click="BiliDeleteButton_Click"/>
-                            <Button x:Name="BiliLoginButton" Margin="8,0,0,0" Padding="12,7"
-                                    Style="{StaticResource AccentButtonStyle}"
-                                    Content="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_bili_login]}"
-                                    ToolTip="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_bili_login_tip]}"
-                                    Click="BiliLoginButton_Click"/>
-                        </StackPanel>
-                        <TextBlock x:Name="BiliStatusText" VerticalAlignment="Center" FontSize="13"
-                                   TextWrapping="Wrap" Foreground="{DynamicResource TextSecondaryBrush}"/>
-                    </DockPanel>
-
-                    <Border BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" CornerRadius="8" Background="{DynamicResource InputBgBrush}" Height="230">
-                        <Grid>
-                            <TextBox x:Name="BiliQrText" Margin="10" BorderThickness="0" Background="Transparent"
-                                     FontFamily="Consolas" FontSize="4.2" IsReadOnly="True"
-                                     TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
-                                     Foreground="{DynamicResource TextPrimaryBrush}"/>
-                            <TextBlock x:Name="BiliQrPlaceholder" Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_bili_qr_note]}"
-                                       HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="18" FontWeight="SemiBold"
-                                       Foreground="{DynamicResource TextTertiaryBrush}"/>
-                            <Image x:Name="BiliQrImage" Stretch="Uniform" Margin="10" Visibility="Collapsed"
-                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                        </Grid>
-                    </Border>
-                    <TextBlock x:Name="BiliLoginHint2" FontSize="12" Foreground="{DynamicResource TextTertiaryBrush}" TextWrapping="Wrap" Margin="0,8,0,0"
-                               Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_bili_scan_hint]}"/>
-                </StackPanel>
-            </Border>
-
-            <!-- B站浏览器 Cookie 待排 -->
-            <Border Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="20" Margin="0,0,0,16">
-                <StackPanel>
-                    <TextBlock x:Name="BiliCookieTitle" FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,4"/>
-                    <TextBlock x:Name="BiliCookieSub" FontSize="12" Foreground="{DynamicResource TextTertiaryBrush}" TextWrapping="Wrap" Margin="0,0,0,10"/>
-                    <StackPanel Orientation="Horizontal">
-                        <Button x:Name="BiliBrowserLoginButton" Padding="14,8" Margin="0,0,8,10"
-                                Style="{StaticResource AccentButtonStyle}"
-                                Click="BiliBrowserLoginButton_Click"/>
-                        <Button x:Name="BiliFetchCookieButton" Padding="14,8" Margin="0,0,0,10"
-                                Style="{StaticResource GhostButtonStyle}"
-                                Click="BiliFetchCookieButton_Click"/>
-                    </StackPanel>
-                    <TextBox x:Name="BiliCookieBox" Padding="10,8" FontSize="13" FontFamily="Consolas"
-                             TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
-                             Margin="0,0,0,10"/>
-                    <StackPanel Orientation="Horizontal">
-                        <Button x:Name="BiliCookieSaveButton" Padding="14,7" Margin="0,0,8,0"
-                                Style="{StaticResource AccentButtonStyle}"
-                                Click="BiliCookieSaveButton_Click"/>
-                        <Button x:Name="BiliCookieClearButton" Padding="14,7"
-                                Style="{StaticResource GhostButtonStyle}"
-                                Click="BiliCookieClearButton_Click"/>
-                    </StackPanel>
-                </StackPanel>
-            </Border>
         </StackPanel>
     </ScrollViewer>
 </UserControl>

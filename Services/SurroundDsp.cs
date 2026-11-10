@@ -23,7 +23,21 @@ public enum SurroundMode
 	Echo = 2,
 
 	/// <summary>HaasRear + 回声：两者叠加，最夸张的一套。</summary>
-	Combined = 3
+	Combined = 3,
+
+	/// <summary>模拟 HIFI 环绕 + B + D 三合一，以 D（回声）为主。
+	///
+	/// 为什么单独开一个模式而不是把预设改掉：老配置里已经存了 0~3，
+	/// 改老模式的算法会让「上次听着还行，今天变了」说不清是改了哪一项。
+	/// 新模式让「合并版」是一个显式的选择，设置也能原样读回来。
+	///
+	/// 合成方式：先算同相 HIFI 基础（加宽 + 带限去相关环境 + 虚拟低音，
+	/// 全部左右同相，声像不偏），再叠一层压低过的 B 空间分量（Haas 侧环 +
+	/// 后环绕 + 虚拟低音），最后串 D 的反馈延迟回声，湿声占比最高 ——
+	/// 用户点名要的是 D 的效果，B 只当底噪一样的空间垫。
+	/// 每层各留一份余量，outScale 压得比 A/B/C 都低，
+	/// 三层叠起来最容易顶到 0dBFS 让限幅器一直工作（听着「糊」）。</summary>
+	HifiMerged = 4
 }
 
 /// <summary>
@@ -142,7 +156,15 @@ public sealed class SurroundEffectSampleProvider : ISampleProvider
 
 	private bool _usesHaas => _mode == SurroundMode.HaasRear || _mode == SurroundMode.Combined;
 
-	private bool _usesEcho => _mode == SurroundMode.Echo || _mode == SurroundMode.Combined;
+	private bool _usesEcho => _mode == SurroundMode.Echo || _mode == SurroundMode.Combined
+		|| _mode == SurroundMode.HifiMerged;
+
+	// 回声的湿声量/反馈量做成字段：合并模式里 D 要当主角，
+	// 湿声比 Echo/Combined 明显更大。反馈仍留足余量（<1），
+	// 再高就会自激 —— 链末的限幅器只压峰值，压不住这种累积增益。
+	private readonly float _echoMix;
+
+	private readonly float _echoFb;
 
 	public WaveFormat WaveFormat => _source.WaveFormat;
 
@@ -173,6 +195,17 @@ public sealed class SurroundEffectSampleProvider : ISampleProvider
 		_echoL = new float[_echoDelay + 1];
 		_echoR = new float[_echoDelay + 1];
 		_lpAlphaEcho = 1f - (float)Math.Exp((double)(0f - 2f * (double)Math.PI * EchoLowpassHz) / (double)sampleRate);
+		if (mode == SurroundMode.HifiMerged)
+		{
+			// D 是这一套的主角：湿声比单开回声高 60%，反馈也高一点让余响更长。
+			_echoMix = 0.45f;
+			_echoFb = 0.44f;
+		}
+		else
+		{
+			_echoMix = 0.28f;
+			_echoFb = EchoFeedback;
+		}
 
 		_inBuf = new float[source.WaveFormat.Channels * 4096];
 	}
@@ -191,6 +224,11 @@ public sealed class SurroundEffectSampleProvider : ISampleProvider
 		if (_usesHaas)
 		{
 			return ReadHaas(buffer, offset, frames, strength);
+		}
+
+		if (_mode == SurroundMode.HifiMerged)
+		{
+			return ReadHifiMerged(buffer, offset, frames, strength);
 		}
 
 		// 空间分量全部同相注入 L/R（amb/dec 加到两边、wide 以 M/S 对称展开），
@@ -274,6 +312,75 @@ public sealed class SurroundEffectSampleProvider : ISampleProvider
 		return frames * 2;
 	}
 
+	/// <summary>HIFI 基础 + B 空间分量 + D 回声（回声为主）。
+	///
+	/// 关键是三层的滤波器状态要各自独立：
+	/// A 那套用 AllpassDiff/_lpAmbLow/_lpAmbHigh/_lpSub，
+	/// B 那套用 HaasDelay/HaasAllpass/RearDelay/_lpRear/_lpBass，
+	/// D 那套用 _echoL/_echoR。它们读写的缓冲和相位指针互不重叠，
+	/// 所以同一个循环里可以依次推进 —— 这也是这个模式不用拆成三个
+	/// provider 串联的原因（串联会多两轮格式转换和缓冲拷贝）。
+	///
+	/// B 的成分在这里都压到 A 的三四成：叠在已经加宽过的信号上，
+	/// 26ms Haas + 31ms 后环绕的延迟差会互相干涉出很脏的梳状峰。
+	/// 压低不是为了好听，是为了让它只当空间垫，
+	/// 听感上的主角是最后那道 D 的回声。</summary>
+	private int ReadHifiMerged(float[] buffer, int offset, int frames, float strength)
+	{
+		int channels = _source.WaveFormat.Channels;
+		// A 层：和 SamePhase 同参数，这是「模拟 HIFI 环绕」的本体。
+		float sideGain = 1f + 0.16f * strength;
+		float ambGain = 0.20f * strength;
+		float subBoost = 0.08f * strength;
+		// B 层：单独压低。
+		float haasGain = 0.34f * strength;
+		float rearGain = 0.26f * strength;
+		float bassBoost = 0.20f * strength;
+		float decorrMix = 0.22f * strength;
+		// 三层都在加东西，先按叠加量预留更多余量，别让 SoftClip 一直起作用。
+		float outScale = 1f - 0.16f * strength;
+		for (int i = 0; i < frames; i++)
+		{
+			float left = _inBuf[i * channels];
+			float right = _inBuf[i * channels + 1];
+			float mid = (left + right) * 0.5f;
+			float side = (left - right) * 0.5f;
+
+			// ---- A 层：同相 HIFI 基础，全部左右同相，声像不偏 ----
+			float dec = AllpassDiff(mid);
+			_lpAmbLow += _lpAlphaAmbLow * (dec - _lpAmbLow);
+			float band = dec - _lpAmbLow;
+			_lpAmbHigh += _lpAlphaAmbHigh * (band - _lpAmbHigh);
+			float amb = _lpAmbHigh * ambGain;
+			_lpSub += _lpAlphaSub * (mid - _lpSub);
+			float sub = _lpSub * subBoost;
+			float wide = side * sideGain;
+
+			float outL = mid + wide + amb + sub;
+			float outR = mid - wide + amb + sub;
+
+			// ---- B 层：Haas 侧环 + 后环绕 + 虚拟低音，压低当垫 ----
+			float haas = HaasDelay(side) * haasGain;
+			float haasDec = HaasAllpass(mid) * decorrMix;
+			float rear = RearDelay(mid);
+			_lpRear += _lpAlphaRear * (rear - _lpRear);
+			float rearOut = _lpRear * rearGain;
+			_lpBass += _lpAlphaBass * (mid - _lpBass);
+			float bass = _lpBass * bassBoost;
+
+			// Haas 是左右反号加入：延迟进对侧声道才有环绕感。
+			outL += haas + haasDec + rearOut + bass;
+			outR -= haas;
+			outR += haasDec + rearOut + bass;
+
+			// ---- D 层：反馈延迟回声，这一套的主角 ----
+			EchoTick(outL, outR, ref outL, ref outR, strength);
+			buffer[offset + i * 2] = SoftClip(outL * outScale);
+			buffer[offset + i * 2 + 1] = SoftClip(outR * outScale);
+		}
+		return frames * 2;
+	}
+
 	/// <summary>反馈延迟回声。左右两条延迟线互相串声，
 	/// 出来的回声在两侧都有，比单声道回声宽。回声路带 3500Hz 低通避免刺耳。</summary>
 	private void EchoTick(float inL, float inR, ref float outL, ref float outR, float strength)
@@ -286,13 +393,14 @@ public sealed class SurroundEffectSampleProvider : ISampleProvider
 		float wetL = _lpEchoL;
 		float wetR = _lpEchoR;
 
-		// 反馈：把（干声+湿声）写回延迟线。反馈量固定 0.36，
-		// 再高就会自激，链末的 Limiter 只能压住峰值、压不住这种累积增益。
-		_echoL[pos] = inL + wetL * EchoFeedback;
-		_echoR[pos] = inR + wetR * EchoFeedback;
+		// 反馈：把（干声+湿声）写回延迟线。反馈量是实例字段
+		// （合并模式给到 0.44），必须留余量（<1）：再高就会自激，
+		// 链末的 Limiter 只能压住峰值、压不住这种累积增益。
+		_echoL[pos] = inL + wetL * _echoFb;
+		_echoR[pos] = inR + wetR * _echoFb;
 		_echoPos = (pos + 1) % _echoDelay;
 
-		float mix = 0.28f * strength;
+		float mix = _echoMix * strength;
 		outL = inL + wetR * mix; // 交叉：右回声喂左，听感更宽
 		outR = inR + wetL * mix;
 	}

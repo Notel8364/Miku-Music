@@ -116,6 +116,46 @@ public static class ThemeManager
 		}
 	}
 
+	/// <summary>强调色本身相对亮度的下限。
+	/// 深色主题下强调色比背景还暗、浅色主题下比背景还亮时，
+	/// 那个强调色就等于不存在：播放键、进度条、选中项全都看不见，
+	/// 整块界面看着像「变了色」。设这个下限就是让它们至少能被认出来。</summary>
+	private const double MinAccentLuminance = 0.30;
+	private const double MaxAccentLuminance = 0.62;
+
+	/// <summary>把强调色夹进「当前主题下看得见」的亮度区间。
+	/// 只动到亮/暗的两端，色相和饱和度都保留，所以天蓝不会变、天蓝变灰也不会变。</summary>
+	public static Color ReadableAccent(Color accent)
+	{
+		double lum = Luminance(accent);
+		// 深色主题往白里提，浅色主题往黑里压。
+		Color target = IsDark ? Colors.White : Colors.Black;
+		if (IsDark)
+		{
+			if (lum >= MinAccentLuminance)
+			{
+				return accent;
+			}
+		}
+		else if (lum <= MaxAccentLuminance)
+		{
+			return accent;
+		}
+		return Mix(accent, target, 0.90);
+	}
+
+	private static Color Mix(Color a, Color b, double t)
+	{
+		byte Ch(byte x, byte y) => (byte)Math.Clamp(Math.Round(x + (y - x) * t), 0, 255);
+		return Color.FromRgb(Ch(a.R, b.R), Ch(a.G, b.G), Ch(a.B, b.B));
+	}
+
+	/// <summary>感知亮度（ITU-R BT.709），0 = 黑，1 = 白。</summary>
+	private static double Luminance(Color c)
+	{
+		return (0.2126 * c.R + 0.7152 * c.G + 0.0722 * c.B) / 255.0;
+	}
+
 	/// <summary>两个跟着强调色走的底色，单独算，方便换色时一起更新。</summary>
 	public static void ApplyAccentDerived(ResourceDictionary res)
 	{
@@ -172,6 +212,24 @@ public static class ThemeManager
 
 	public static SolidColorBrush CardFill() =>
 		(SolidColorBrush)Brush("CardBgBrush", new SolidColorBrush(Color.FromArgb(0x0D, 255, 255, 255)));
+
+	/// <summary>卡片底色「压成不透明」后的实色：把 CardBgBrush 的 alpha 与页面底色
+	/// 混合一次，得到肉眼看到的那层颜色，但 alpha=255。
+	///
+	/// 专门给吸顶的组头用：卡片底默认只有 5% 白（深色主题），
+	/// 拿来当吸顶底等于没底，下面滚过的文字会直接透上来叠成一团。
+	/// 这里算出来的颜色和面板看起来完全一致，却能真正挡住内容。</summary>
+	public static SolidColorBrush OpaqueCardFill()
+	{
+		Color card = CardFill().Color;
+		Color page = ((SolidColorBrush)Brush("PageBgBrush",
+			new SolidColorBrush(Color.FromRgb(0x0C, 0x0C, 0x0C)))).Color;
+		double a = card.A / 255.0;
+		return new SolidColorBrush(Color.FromRgb(
+			(byte)Math.Round(card.R * a + page.R * (1 - a)),
+			(byte)Math.Round(card.G * a + page.G * (1 - a)),
+			(byte)Math.Round(card.B * a + page.B * (1 - a))));
+	}
 
 	private static bool SystemThemePrefersDark()
 	{

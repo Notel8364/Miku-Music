@@ -1,0 +1,522 @@
+<UserControl x:Class="MusicBox.Pages.AccountPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:loc="clr-namespace:MusicBox.Services"
+             mc:Ignorable="d">
+    <UserControl.Resources>
+        <!-- 登录卡片的折叠头。原来四块登录区是三张并排的小卡 + 一张独立的
+             B 站大卡，四块输入框全摊开、四个说明文字全摊开，一屏塞不下，
+             真正要用的「保存/清除」按钮被挤到最下面。
+             现在四块统一成「一行摘要 + 点开才展开」：
+             折叠头是一整行可点的 ToggleButton，悬停有底色，
+             左边平台名、右边登录状态，中间一个会转的箭头。 -->
+        <Geometry x:Key="ChevronGeometry">M 0,0 L 5,4.5 L 10,0</Geometry>
+
+        <Style x:Key="LoginCardHeaderStyle" TargetType="ToggleButton">
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Focusable" Value="False"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="Bd" Background="Transparent" CornerRadius="8" Padding="10,9"
+                                SnapsToDevicePixels="True">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="Center"/>
+                        </Border>
+                        <!-- 必须放ControlTemplate.Triggers，不能放 Border.Triggers。
+                             模板根元素走的是 FrameworkElement.TryFireInitialized，
+                             那条路把元素自己的 Triggers 当成 EventTrigger 集合处理，
+                             里面塞属性 Trigger 会抛 "Triggers 不是元素的有效子项"，
+                             而且是 ApplyTemplate 时才炸 —— 编译和 XAML 解析都过得去，
+                             一进设置页就崩。 -->
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background"
+                                        Value="{DynamicResource SubtleFillHoverBrush}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- 登录状态那一行的小圆点 + 文字。已登录用强调色，未登录用三级文字色，
+             不用纯绿/纯红 —— 强调色本身就是用户挑的「成功色」，
+             再叠一个固定绿会打架。 -->
+        <Style x:Key="LoginStatusDotStyle" TargetType="Ellipse">
+            <Setter Property="Width" Value="7"/>
+            <Setter Property="Height" Value="7"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Margin" Value="0,0,7,0"/>
+            <Setter Property="Fill" Value="{DynamicResource TextTertiaryBrush}"/>
+        </Style>
+    </UserControl.Resources>
+    <!-- 横向滚动必须 Disabled：Hidden/Auto 下 ScrollViewer 会用「无限宽」量内容，
+         展开区里换行文本想要多宽就给多宽；收起态只有标题行量不出大宽度，
+         一旦展开，整列立刻从「标题行宽」跳到「内容想要宽」——这就是
+         点开一张卡整个内容区被拉宽的根因。Disabled 之后内容按视口宽定宽，
+         展开前后宽度零变化。 -->
+    <ScrollViewer x:Name="AccountScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <!-- Stretch + MaxWidth：内容列宽度恒等于 min(视口宽, 820)，
+             与哪张卡展开无关；收起态用 Left 的话整列只有标题行那么窄，
+             展开瞬间会被撑到 820，卡片集体变宽。 -->
+        <StackPanel MaxWidth="820" HorizontalAlignment="Stretch" Margin="0,0,10,10">
+            <TextBlock Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_login_section]}"
+                       FontSize="28" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,16"/>
+
+            <!-- 四个平台的登录区：网易云 / QQ / 酷狗 / B 站。
+                     每块默认收成一行「平台名 · 已登录/未登录」，点一下才展开
+                     里面那口大 Cookie 输入框和全部按钮。
+                     以前是三张小卡并排 + 一张独立的 B 站大卡，
+                     四块输入框同时摊开，一屏塞不下，
+                     而大多数人只配了一两个平台。 -->
+            <StackPanel x:Name="LoginSection" Margin="0,0,0,16">
+                <!-- ============ 网易云 ============ -->
+                <Border Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="10" Margin="0,0,0,10">
+                    <StackPanel>
+                        <ToggleButton x:Name="NeteaseHeader" Style="{StaticResource LoginCardHeaderStyle}"
+                                      Click="LoginHeader_Click" Tag="Netease">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <Path x:Name="NeteaseChevron" Grid.Column="0" Data="{StaticResource ChevronGeometry}"
+                                      Stroke="{DynamicResource TextTertiaryBrush}" StrokeThickness="1.6"
+                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                      Width="10" Height="9" VerticalAlignment="Center" Margin="0,0,10,0">
+                                    <Path.RenderTransform>
+                                        <RotateTransform x:Name="NeteaseChevronRotate" CenterX="5" CenterY="4.5" Angle="90"/>
+                                    </Path.RenderTransform>
+                                </Path>
+                                <TextBlock x:Name="NeteaseCookieTitle" Grid.Column="1" FontSize="14" FontWeight="SemiBold"
+                                           VerticalAlignment="Center" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <Ellipse x:Name="NeteaseStatusDot" Style="{StaticResource LoginStatusDotStyle}"/>
+                                    <TextBlock x:Name="NeteaseStatusText" FontSize="12.5" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource TextSecondaryBrush}"/>
+                                </StackPanel>
+                            </Grid>
+                        </ToggleButton>
+
+                        <StackPanel x:Name="NeteaseBody" Margin="10,4,10,10" Visibility="Collapsed">
+                            <!-- 展开/收起靠 ScaleY 0↔1 走，不是硬切 Visibility。
+                                 用 LayoutTransform 而不是改 Height：Height 得自己量
+                                 DesiredSize，而这块里的东西高度会跟着窗口宽度换行变化，
+                                 量一次就过时了（窗口一拉宽，下一次展开高度还是老的）。
+                                 LayoutTransform 交给布局去算，缩放动画停在 1 时
+                                 外观和原来完全一样。 -->
+                            <StackPanel.LayoutTransform>
+                                <ScaleTransform x:Name="NeteaseBodyScale" ScaleX="1" ScaleY="1"/>
+                            </StackPanel.LayoutTransform>
+                            <TextBlock x:Name="NeteaseSub" FontSize="12" Foreground="{DynamicResource TextTertiaryBrush}"
+                                       TextWrapping="Wrap" Margin="0,0,0,10"/>
+                            <!-- ① 登录行：[网页登录] 主键 + [扫码登录][读取本机Cookie] 辅键。
+                                 扫码是网易云独有的第三条路，留着不删（能力只有网易云有）。 -->
+                            <WrapPanel Margin="0,0,0,10">
+                                <Button x:Name="NeteaseBrowserLoginButton" Padding="10,6" Margin="0,0,6,6"
+                                        Style="{StaticResource AccentButtonStyle}"
+                                        Click="NeteaseBrowserLoginButton_Click"/>
+                                <Button x:Name="NeteaseQrButton" Padding="10,6" Margin="0,0,6,6"
+                                        Style="{StaticResource GhostButtonStyle}"
+                                        Click="NeteaseQrButton_Click"/>
+                                <Button x:Name="NeteaseFetchCookieButton" Padding="10,6" Margin="0,0,6,6"
+                                        Style="{StaticResource GhostButtonStyle}"
+                                        Click="NeteaseFetchCookieButton_Click"/>
+                            </WrapPanel>
+                            <!-- ② Cookie 行：统一「输入区 + 保存Cookie/清除」。 -->
+                            <TextBox x:Name="NeteaseCookieBox" Padding="9,7" FontSize="12" FontFamily="Consolas"
+                                     TextWrapping="Wrap" AcceptsReturn="False" VerticalScrollBarVisibility="Auto" Height="60" Margin="0,0,0,10"/>
+                            <WrapPanel>
+                                <Button x:Name="NeteaseCookieSaveButton" Padding="10,6" Margin="0,0,6,6"
+                                        Style="{StaticResource AccentButtonStyle}"
+                                        Click="NeteaseCookieSaveButton_Click"/>
+                                <Button x:Name="NeteaseCookieClearButton" Padding="10,6" Margin="0,0,6,6"
+                                        Style="{StaticResource GhostButtonStyle}"
+                                        Click="NeteaseCookieClearButton_Click"/>
+                            </WrapPanel>
+                            <!-- 收藏夹区：已登录时显示「加载收藏夹」按钮，点击才拉取账号下的歌单
+                                 （不做自动轮询/自动加载：多打一次接口就多一分风控暴露，
+                                 而且不是人人都用这个功能）。下方是代码动态填进去的歌单行列表。
+                                 按钮行整条是收缩头：点行（按钮以外）收起/展开歌单列表，
+                                 状态文字带账号名（加载成功后补拉一次昵称）。 -->
+                            <StackPanel x:Name="NeteasePlaylistSection" Margin="0,10,0,0">
+                                <Grid Background="Transparent" Cursor="Hand"
+                                      MouseLeftButtonDown="PlaylistSectionHeader_Click" Tag="netease"
+                                      ToolTip="{Binding Source={x:Static loc:Loc.Default}, Path=Item[act_toggle_section]}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Button x:Name="NeteasePlaylistLoadButton" Padding="10,6"
+                                            Style="{StaticResource GhostButtonStyle}"
+                                            Click="NeteasePlaylistLoadButton_Click"/>
+                                    <TextBlock x:Name="NeteasePlaylistStatus" Grid.Column="1" Margin="10,0,0,0"
+                                               FontSize="12" Foreground="{DynamicResource TextTertiaryBrush}"
+                                               TextWrapping="Wrap" VerticalAlignment="Center"/>
+                                    <TextBlock x:Name="NeteasePlaylistChevron" Grid.Column="2" Text="&#xE70D;"
+                                               FontFamily="Segoe MDL2 Assets" FontSize="12"
+                                               VerticalAlignment="Center" Margin="8,0,0,0"
+                                               Foreground="{DynamicResource TextSecondaryBrush}"
+                                               RenderTransformOrigin="0.5,0.5">
+                                        <TextBlock.RenderTransform>
+                                            <RotateTransform x:Name="NeteasePlaylistChevronRotate" Angle="0"/>
+                                        </TextBlock.RenderTransform>
+                                    </TextBlock>
+                                </Grid>
+                                <StackPanel x:Name="NeteasePlaylistList" Margin="0,8,0,0"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- ============ QQ 音乐 ============ -->
+                <Border Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="10" Margin="0,0,0,10">
+                    <StackPanel>
+                        <ToggleButton x:Name="QqHeader" Style="{StaticResource LoginCardHeaderStyle}"
+                                      Click="LoginHeader_Click" Tag="Qq">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <Path x:Name="QqChevron" Grid.Column="0" Data="{StaticResource ChevronGeometry}"
+                                      Stroke="{DynamicResource TextTertiaryBrush}" StrokeThickness="1.6"
+                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                      Width="10" Height="9" VerticalAlignment="Center" Margin="0,0,10,0">
+                                    <Path.RenderTransform>
+                                        <RotateTransform x:Name="QqChevronRotate" CenterX="5" CenterY="4.5" Angle="90"/>
+                                    </Path.RenderTransform>
+                                </Path>
+                                <TextBlock x:Name="QqCookieTitle" Grid.Column="1" FontSize="14" FontWeight="SemiBold"
+                                           VerticalAlignment="Center" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <Ellipse x:Name="QqStatusDot" Style="{StaticResource LoginStatusDotStyle}"/>
+                                    <TextBlock x:Name="QqStatusText" FontSize="12.5" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource TextSecondaryBrush}"/>
+                                </StackPanel>
+                            </Grid>
+                        </ToggleButton>
+
+                        <StackPanel x:Name="QqBody" Margin="10,4,10,10" Visibility="Collapsed">
+                            <StackPanel.LayoutTransform>
+                                <ScaleTransform x:Name="QqBodyScale" ScaleX="1" ScaleY="1"/>
+                            </StackPanel.LayoutTransform>
+                            <TextBlock x:Name="QqSub" FontSize="12" Foreground="{DynamicResource TextTertiaryBrush}"
+                                       TextWrapping="Wrap" Margin="0,0,0,10"/>
+                            <!-- ① 登录行：[网页登录]（内置浏览器，登录完自动带回 Cookie）
+                                 + [读取本机Cookie]。「打开浏览器登录」是同一条路的劣化版
+                                 （拿不到 httpOnly，还得手动回去点读取），三段式统一时砍掉。 -->
+                            <WrapPanel Margin="0,0,0,10">
+                                <Button x:Name="QqWebLoginButton" Padding="10,6" Margin="0,0,6,6"
+                                        Style="{StaticResource AccentButtonStyle}"
+                                        Click="QqWebLoginButton_Click"/>
+                                <Button x:Name="QqFetchCookieButton" Padding="10,6" Margin="0,0,6,6"
+                                        Style="{StaticResource GhostButtonStyle}"
+                                        Click="QqFetchCookieButton_Click"/>
+                            </WrapPanel>
+                            <!-- ② Cookie 行 -->
+                            <TextBox x:Name="QqCookieBox" Padding="9,7" FontSize="12" FontFamily="Consolas"
+                                     TextWrapping="Wrap" AcceptsReturn="False" VerticalScrollBarVisibility="Auto" Height="60" Margin="0,0,0,10"/>
+                            <WrapPanel>
+                                <Button x:Name="QqCookieSaveButton" Padding="10,6" Margin="0,0,6,6"
+                                        Style="{StaticResource AccentButtonStyle}"
+                                        Click="QqCookieSaveButton_Click"/>
+                                <Button x:Name="QqCookieClearButton" Padding="10,6" Margin="0,0,6,6"
+                                        Style="{StaticResource GhostButtonStyle}"
+                                        Click="QqCookieClearButton_Click"/>
+                            </WrapPanel>
+                            <!-- 收藏夹区：和网易云那张卡同构，走 musicu.fcg 拉账号歌单。
+                                 请求只在用户点按钮/点歌单时发出，绝不自动轮询。
+                                 按钮行同样是收缩头（点行收起/展开歌单列表）。 -->
+                            <StackPanel x:Name="QqPlaylistSection" Margin="0,10,0,0">
+                                <Grid Background="Transparent" Cursor="Hand"
+                                      MouseLeftButtonDown="PlaylistSectionHeader_Click" Tag="qq"
+                                      ToolTip="{Binding Source={x:Static loc:Loc.Default}, Path=Item[act_toggle_section]}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Button x:Name="QqPlaylistLoadButton" Padding="10,6"
+                                            Style="{StaticResource GhostButtonStyle}"
+                                            Click="QqPlaylistLoadButton_Click"/>
+                                    <TextBlock x:Name="QqPlaylistStatus" Grid.Column="1" Margin="10,0,0,0"
+                                               FontSize="12" Foreground="{DynamicResource TextTertiaryBrush}"
+                                               TextWrapping="Wrap" VerticalAlignment="Center"/>
+                                    <TextBlock x:Name="QqPlaylistChevron" Grid.Column="2" Text="&#xE70D;"
+                                               FontFamily="Segoe MDL2 Assets" FontSize="12"
+                                               VerticalAlignment="Center" Margin="8,0,0,0"
+                                               Foreground="{DynamicResource TextSecondaryBrush}"
+                                               RenderTransformOrigin="0.5,0.5">
+                                        <TextBlock.RenderTransform>
+                                            <RotateTransform x:Name="QqPlaylistChevronRotate" Angle="0"/>
+                                        </TextBlock.RenderTransform>
+                                    </TextBlock>
+                                </Grid>
+                                <StackPanel x:Name="QqPlaylistList" Margin="0,8,0,0"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- ============ 酷狗 ============ -->
+                <Border Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="10" Margin="0,0,0,10">
+                    <StackPanel>
+                        <ToggleButton x:Name="KugouHeader" Style="{StaticResource LoginCardHeaderStyle}"
+                                      Click="LoginHeader_Click" Tag="Kugou">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <Path x:Name="KugouChevron" Grid.Column="0" Data="{StaticResource ChevronGeometry}"
+                                      Stroke="{DynamicResource TextTertiaryBrush}" StrokeThickness="1.6"
+                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                      Width="10" Height="9" VerticalAlignment="Center" Margin="0,0,10,0">
+                                    <Path.RenderTransform>
+                                        <RotateTransform x:Name="KugouChevronRotate" CenterX="5" CenterY="4.5" Angle="90"/>
+                                    </Path.RenderTransform>
+                                </Path>
+                                <TextBlock x:Name="KugouCookieTitle" Grid.Column="1" FontSize="14" FontWeight="SemiBold"
+                                           VerticalAlignment="Center" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <Ellipse x:Name="KugouStatusDot" Style="{StaticResource LoginStatusDotStyle}"/>
+                                    <TextBlock x:Name="KugouStatusText" FontSize="12.5" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource TextSecondaryBrush}"/>
+                                </StackPanel>
+                            </Grid>
+                        </ToggleButton>
+
+                        <StackPanel x:Name="KugouBody" Margin="10,4,10,10" Visibility="Collapsed">
+                            <StackPanel.LayoutTransform>
+                                <ScaleTransform x:Name="KugouBodyScale" ScaleX="1" ScaleY="1"/>
+                            </StackPanel.LayoutTransform>
+                            <TextBlock x:Name="KugouSub" FontSize="12" Foreground="{DynamicResource TextTertiaryBrush}"
+                                       TextWrapping="Wrap" Margin="0,0,0,10"/>
+                            <!-- ① 登录行：网页登录收的 Cookie 没有 userid/token，
+                                 收藏夹用不了；真正能拉歌单的是「扫码登录」拿到的
+                                 手机域会话（userid+token），所以它才是主推入口。 -->
+                            <WrapPanel Margin="0,0,0,10">
+                                <Button x:Name="KugouQrLoginButton" Padding="10,6" Margin="0,0,6,6"
+                                        Style="{StaticResource AccentButtonStyle}"
+                                        Click="KugouQrLoginButton_Click"/>
+                                <Button x:Name="KugouWebLoginButton" Padding="10,6" Margin="0,0,6,6"
+                                        Style="{StaticResource GhostButtonStyle}"
+                                        Click="KugouWebLoginButton_Click"/>
+                            </WrapPanel>
+                            <!-- ② Cookie 行（昵称是酷狗卡片特有的展示字段，保留在输入区上方） -->
+                            <DockPanel Margin="0,0,0,10">
+                                <TextBlock x:Name="KugouNickLabel" Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_kugou_nick]}"
+                                           VerticalAlignment="Center" FontSize="12.5" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                <TextBox x:Name="KugouNickBox" Padding="9,7" FontSize="12.5" Margin="10,0,0,0"/>
+                            </DockPanel>
+                            <TextBox x:Name="KugouCookieBox" Padding="9,7" FontSize="12" FontFamily="Consolas"
+                                     TextWrapping="Wrap" AcceptsReturn="False" VerticalScrollBarVisibility="Auto" Height="60" Margin="0,0,0,10"/>
+                            <WrapPanel>
+                                <Button x:Name="KugouCookieSaveButton" Padding="10,6" Margin="0,0,6,6"
+                                        Style="{StaticResource AccentButtonStyle}"
+                                        Click="KugouCookieSaveButton_Click"/>
+                                <Button x:Name="KugouCookieClearButton" Padding="10,6" Margin="0,0,6,6"
+                                        Style="{StaticResource GhostButtonStyle}"
+                                        Click="KugouCookieClearButton_Click"/>
+                            </WrapPanel>
+                            <!-- ③ 收藏夹行：扫码登录拿到 userid+token 后即可拉取账号歌单，
+                                 点歌单行把曲目灌进在线页。按钮是否可用由代码按会话判定
+                                 （纯网页 Cookie 没有 userid/token，仍会置灰）。 -->
+                            <StackPanel Margin="0,10,0,0">
+                                <Button x:Name="KugouPlaylistLoadButton" Padding="10,6" HorizontalAlignment="Left"
+                                        Style="{StaticResource GhostButtonStyle}"
+                                        Click="KugouPlaylistLoadButton_Click"/>
+                                <TextBlock x:Name="KugouPlaylistStatus" Margin="0,6,0,0" FontSize="12"
+                                           Foreground="{DynamicResource TextTertiaryBrush}" TextWrapping="Wrap"/>
+                                <StackPanel x:Name="KugouPlaylistList" Margin="0,6,0,0"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- ============ B 站（Cookie） ============
+                     原来这块在页面最末尾、单独一张 20 padding 的大卡，
+                     位置和另外三块差出半屏，滚动时很容易找不到。
+                     现在并到同一组里，四块的折叠方式和间距完全一致。 -->
+                <Border Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="10">
+                    <StackPanel>
+                        <ToggleButton x:Name="BiliCookieHeader" Style="{StaticResource LoginCardHeaderStyle}"
+                                      Click="LoginHeader_Click" Tag="Bili">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <Path x:Name="BiliCookieChevron" Grid.Column="0" Data="{StaticResource ChevronGeometry}"
+                                      Stroke="{DynamicResource TextTertiaryBrush}" StrokeThickness="1.6"
+                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                      Width="10" Height="9" VerticalAlignment="Center" Margin="0,0,10,0">
+                                    <Path.RenderTransform>
+                                        <RotateTransform x:Name="BiliCookieChevronRotate" CenterX="5" CenterY="4.5" Angle="90"/>
+                                    </Path.RenderTransform>
+                                </Path>
+                                <TextBlock x:Name="BiliCookieTitle" Grid.Column="1" FontSize="14" FontWeight="SemiBold"
+                                           VerticalAlignment="Center" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <Ellipse x:Name="BiliCookieStatusDot" Style="{StaticResource LoginStatusDotStyle}"/>
+                                    <TextBlock x:Name="BiliCookieStatusText" FontSize="12.5" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource TextSecondaryBrush}"/>
+                                </StackPanel>
+                            </Grid>
+                        </ToggleButton>
+
+                        <StackPanel x:Name="BiliCookieBody" Margin="10,4,10,10" Visibility="Collapsed">
+                            <StackPanel.LayoutTransform>
+                                <ScaleTransform x:Name="BiliCookieBodyScale" ScaleX="1" ScaleY="1"/>
+                            </StackPanel.LayoutTransform>
+                            <TextBlock x:Name="BiliCookieSub" FontSize="12" Foreground="{DynamicResource TextTertiaryBrush}"
+                                       TextWrapping="Wrap" Margin="0,0,0,10"/>
+                            <WrapPanel Margin="0,0,0,10">
+                                <Button x:Name="BiliBrowserLoginButton" Padding="10,6" Margin="0,0,6,6"
+                                        Style="{StaticResource AccentButtonStyle}"
+                                        Click="BiliBrowserLoginButton_Click"/>
+                                <Button x:Name="BiliFetchCookieButton" Padding="10,6" Margin="0,0,6,6"
+                                        Style="{StaticResource GhostButtonStyle}"
+                                        Click="BiliFetchCookieButton_Click"/>
+                            </WrapPanel>
+                            <TextBox x:Name="BiliCookieBox" Padding="9,7" FontSize="12" FontFamily="Consolas"
+                                     TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Height="60" Margin="0,0,0,10"/>
+                            <WrapPanel>
+                                <Button x:Name="BiliCookieSaveButton" Padding="10,6" Margin="0,0,6,6"
+                                        Style="{StaticResource AccentButtonStyle}"
+                                        Click="BiliCookieSaveButton_Click"/>
+                                <Button x:Name="BiliCookieClearButton" Padding="10,6" Margin="0,0,6,6"
+                                        Style="{StaticResource GhostButtonStyle}"
+                                        Click="BiliCookieClearButton_Click"/>
+                            </WrapPanel>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+
+            <!-- 汽水音乐：抖音账号体系。无网页版，凭据从官方 PC 客户端导出 Cookie；
+                 当前仅做会话校验（账号/收藏接口需要官方签名头，暂未实现自动同步）。 -->
+            <Border Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="10" Margin="0,0,0,10">
+                <StackPanel>
+                    <ToggleButton x:Name="SodaHeader" Style="{StaticResource LoginCardHeaderStyle}"
+                                  Click="LoginHeader_Click" Tag="Soda">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <Path x:Name="SodaChevron" Grid.Column="0" Data="{StaticResource ChevronGeometry}"
+                                  Stroke="{DynamicResource TextTertiaryBrush}" StrokeThickness="1.6"
+                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                  Width="10" Height="9" VerticalAlignment="Center" Margin="0,0,10,0">
+                                <Path.RenderTransform>
+                                    <RotateTransform x:Name="SodaChevronRotate" CenterX="5" CenterY="4.5" Angle="90"/>
+                                </Path.RenderTransform>
+                            </Path>
+                            <TextBlock x:Name="SodaCookieTitle" Grid.Column="1" FontSize="14" FontWeight="SemiBold"
+                                       VerticalAlignment="Center" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                            <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                                <Ellipse x:Name="SodaStatusDot" Style="{StaticResource LoginStatusDotStyle}"/>
+                                <TextBlock x:Name="SodaStatusText" FontSize="12.5" VerticalAlignment="Center"
+                                           Foreground="{DynamicResource TextSecondaryBrush}"/>
+                            </StackPanel>
+                        </Grid>
+                    </ToggleButton>
+
+                    <StackPanel x:Name="SodaBody" Margin="10,4,10,10" Visibility="Collapsed">
+                        <StackPanel.LayoutTransform>
+                            <ScaleTransform x:Name="SodaBodyScale" ScaleX="1" ScaleY="1"/>
+                        </StackPanel.LayoutTransform>
+                        <TextBlock x:Name="SodaSub" FontSize="12" Foreground="{DynamicResource TextTertiaryBrush}"
+                                   TextWrapping="Wrap" Margin="0,0,0,10"/>
+                        <!-- ① 登录行：汽水只有「网页登录」（在汽水网页版里建的会话才被 API 认）。 -->
+                        <WrapPanel Margin="0,0,0,10">
+                            <Button x:Name="SodaWebLoginButton" Padding="10,6" Margin="0,0,6,6"
+                                    Style="{StaticResource AccentButtonStyle}"
+                                    Click="SodaWebLoginButton_Click"/>
+                        </WrapPanel>
+                        <!-- ② Cookie 行：校验会话是汽水特有的辅助动作（对填进去的 Cookie
+                             做一次真实请求验证），跟着保存/清除放同一行。 -->
+                        <TextBox x:Name="SodaCookieBox" Padding="9,7" FontSize="12" FontFamily="Consolas"
+                                 TextWrapping="Wrap" AcceptsReturn="False" VerticalScrollBarVisibility="Auto" Height="60" Margin="0,0,0,10"/>
+                        <WrapPanel>
+                            <Button x:Name="SodaCookieSaveButton" Padding="10,6" Margin="0,0,6,6"
+                                    Style="{StaticResource AccentButtonStyle}"
+                                    Click="SodaCookieSaveButton_Click"/>
+                            <Button x:Name="SodaCookieClearButton" Padding="10,6" Margin="0,0,6,6"
+                                    Style="{StaticResource GhostButtonStyle}"
+                                    Click="SodaCookieClearButton_Click"/>
+                            <Button x:Name="SodaVerifyButton" Padding="10,6" Margin="0,0,6,6"
+                                    Style="{StaticResource GhostButtonStyle}"
+                                    Click="SodaVerifyButton_Click"/>
+                        </WrapPanel>
+                        <!-- ③ 收藏夹行：汽水的账号/收藏接口要官方签名头，暂不支持同步，
+                             按钮置灰占位。 -->
+                        <StackPanel Margin="0,10,0,0">
+                            <Button x:Name="SodaPlaylistLoadButton" Padding="10,6" HorizontalAlignment="Left"
+                                    IsEnabled="False"
+                                    Style="{StaticResource GhostButtonStyle}"
+                                    ToolTip="{Binding Source={x:Static loc:Loc.Default}, Path=Item[acct_pl_unsupported]}"/>
+                        </StackPanel>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- B站账号（BBDown）待排 -->
+            <Border Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" Padding="20" Margin="0,0,0,16">
+                <StackPanel>
+                    <TextBlock Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_bili_title]}"
+                               FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" Margin="0,0,0,8"/>
+
+                    <DockPanel Margin="0,4,0,10">
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                            <Button x:Name="BiliRefreshButton" Margin="8,0,0,0" Padding="12,7"
+                                    Style="{StaticResource GhostButtonStyle}"
+                                    Content="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_bili_refresh]}"
+                                    Click="BiliRefreshButton_Click"/>
+                            <Button x:Name="BiliDeleteButton" Margin="8,0,0,0" Padding="12,7"
+                                    Style="{StaticResource GhostButtonStyle}"
+                                    Content="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_bili_delete]}"
+                                    Click="BiliDeleteButton_Click"/>
+                            <Button x:Name="BiliLoginButton" Margin="8,0,0,0" Padding="12,7"
+                                    Style="{StaticResource AccentButtonStyle}"
+                                    Content="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_bili_login]}"
+                                    ToolTip="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_bili_login_tip]}"
+                                    Click="BiliLoginButton_Click"/>
+                        </StackPanel>
+                        <TextBlock x:Name="BiliStatusText" VerticalAlignment="Center" FontSize="13"
+                                   TextWrapping="Wrap" Foreground="{DynamicResource TextSecondaryBrush}"/>
+                    </DockPanel>
+
+                    <Border BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1" CornerRadius="8" Background="{DynamicResource InputBgBrush}" Height="230">
+                        <Grid>
+                            <TextBox x:Name="BiliQrText" Margin="10" BorderThickness="0" Background="Transparent"
+                                     FontFamily="Consolas" FontSize="4.2" IsReadOnly="True"
+                                     TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                                     Foreground="{DynamicResource TextPrimaryBrush}"/>
+                            <TextBlock x:Name="BiliQrPlaceholder" Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_bili_qr_note]}"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="18" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextTertiaryBrush}"/>
+                            <Image x:Name="BiliQrImage" Stretch="Uniform" Margin="10" Visibility="Collapsed"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Grid>
+                    </Border>
+                    <TextBlock x:Name="BiliLoginHint2" FontSize="12" Foreground="{DynamicResource TextTertiaryBrush}" TextWrapping="Wrap" Margin="0,8,0,0"
+                               Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[set_bili_scan_hint]}"/>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

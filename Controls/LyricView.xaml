@@ -20,15 +20,20 @@
         3) 离当前行越远的行越淡、字号越小。距离当前行的距离决定透明度，
            这是 BetterLyrics 那类实现里最影响观感的一条：
            所有行同时动会显得很吵，按距离分层之后滚动才有「景深」。
-        4) 用户手动滚轮翻歌词时暂停自动跟随，一停手 2.5 秒再接回来。
+        4) 用户手动滚轮翻歌词时暂停自动跟随，一停手 3 秒再接回来；
+           点某一行则直接跳到那句并立刻恢复跟随。
     -->
     <UserControl.Resources>
     </UserControl.Resources>
 
-    <Grid>
-        <!-- 上下渐隐：歌词滚到边缘时淡出，而不是被硬切一刀 -->
+    <Grid x:Name="LvRoot">
+        <!-- 上下渐隐：歌词滚到边缘时淡出，而不是被硬切一刀。
+             字幕形态（UseSubtitle=true）会把这个清掉：
+             字幕带的边缘行是刻意留的「半个额外行」，被渐隐吃掉的话
+             上一句/下一句就只剩半截，看起来像是歌词被切了。
+             列表形态才需要这个滚到底的淡出效果。 -->
         <Grid.OpacityMask>
-            <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+            <LinearGradientBrush x:Name="LvEdgeMask" StartPoint="0,0" EndPoint="0,1">
                 <GradientStop Color="#00000000" Offset="0.0"/>
                 <GradientStop Color="#FF000000" Offset="0.16"/>
                 <GradientStop Color="#FF000000" Offset="0.84"/>
@@ -50,8 +55,108 @@
             <StackPanel x:Name="LinesHost" Focusable="False"/>
         </ScrollViewer>
 
+        <!-- 字幕形态（沉浸式全屏页用）：跟桌面歌词窗横排字幕带同一套结构——
+             上一句/当前句/下一句 各占一行 + 译文一行；比桌面窗多出前三句/
+             后三句的上下文陪衬行（已唱的三句保持已唱色、待唱的三句保持未唱色），
+             整条字幕带吃 ApplyCustomColors 的自定义色。当前句两层文字叠擦除，
+             切句动画走 LyricAnimTemplates 那套现成的（Float / PushUp）。
+             这份 XAML 是 LyricWindow.HorizontalPanel 的镜像；程序内字幕就是它的
+             「直接拉进来」，代码里因此不再有整屏滚动的列表。 -->
+        <Grid x:Name="SubtitlePanel" Visibility="Collapsed"
+              VerticalAlignment="Center" HorizontalAlignment="Stretch">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- 字幕文字层统一用固定色（对应 LyricVisualTheme.Dl*，与代码
+                 ApplyCustomColors/SpreadBrushes 同一组值），刻意不写
+                 {DynamicResource}：字幕带是桌面歌词呈现层的一部分，
+                 主题切换不该让它跟着变色（暗壁纸上的字会跟着主题变黑）。
+                 深浅层次全靠各自 Opacity 分层。 -->
+            <!-- 上「前三句」：再远的一句，压得很淡作陪衬（三层：P3/P2/P）。
+                 上面三行是唱过的 → 已唱色（DlSung）。 -->
+            <TextBlock x:Name="SubPrev3" Grid.Row="0" Margin="4,2,4,1"
+                       FontSize="13" Opacity="0.10" TextAlignment="Center"
+                       TextWrapping="NoWrap" MaxWidth="600"
+                       Foreground="#FF55A2FF"
+                       TextTrimming="CharacterEllipsis"/>
+
+            <TextBlock x:Name="SubPrev2" Grid.Row="1" Margin="4,4,4,2"
+                       FontSize="14" Opacity="0.20" TextAlignment="Center"
+                       TextWrapping="NoWrap" MaxWidth="620"
+                       Foreground="#FF55A2FF"
+                       TextTrimming="CharacterEllipsis"/>
+
+            <TextBlock x:Name="SubPrev" Grid.Row="2" Margin="4,6"
+                       FontSize="18" Opacity="0.45" TextAlignment="Center"
+                       TextWrapping="NoWrap" MaxWidth="640"
+                       Foreground="#FF55A2FF"
+                       TextTrimming="CharacterEllipsis"/>
+
+            <!-- 当前句。字号由代码按实际宽度自适（FitSubFont），
+                 再长的句子也不会被窗口边缘切掉。 -->
+            <Grid x:Name="SubWipeHost" Grid.Row="3" Margin="4,4" ClipToBounds="True">
+                <TextBlock x:Name="SubCurBase"
+                           VerticalAlignment="Center" HorizontalAlignment="Center"
+                           TextAlignment="Center" TextWrapping="Wrap"
+                           Foreground="#FFFFFFFF"/>
+                <Border x:Name="SubCurLitBorder" VerticalAlignment="Center" HorizontalAlignment="Center">
+                    <Border.Clip>
+                        <RectangleGeometry x:Name="SubCurClip" Rect="0,0,0,200"/>
+                    </Border.Clip>
+                    <TextBlock x:Name="SubCurLit"
+                               VerticalAlignment="Center" HorizontalAlignment="Center"
+                               TextAlignment="Center" TextWrapping="Wrap"
+                               Foreground="#FF55A2FF"/>
+                </Border>
+            </Grid>
+
+            <!-- 下一句。透明度刻意比上一句亮一点：形成「已唱—正在唱—待唱」三档。
+                 下面三行还没唱到 → 未唱色（DlUnsung）。 -->
+            <TextBlock x:Name="SubNext" Grid.Row="4" Margin="4,6"
+                       FontSize="18" Opacity="0.78" TextAlignment="Center"
+                       TextWrapping="NoWrap" MaxWidth="640"
+                       Foreground="#FFFFFFFF"
+                       TextTrimming="CharacterEllipsis"/>
+
+            <TextBlock x:Name="SubNext2" Grid.Row="5" Margin="4,2,4,4"
+                       FontSize="14" Opacity="0.32" TextAlignment="Center"
+                       TextWrapping="NoWrap" MaxWidth="620"
+                       Foreground="#FFFFFFFF"
+                       TextTrimming="CharacterEllipsis"/>
+
+            <TextBlock x:Name="SubNext3" Grid.Row="6" Margin="4,1,4,2"
+                       FontSize="13" Opacity="0.16" TextAlignment="Center"
+                       TextWrapping="NoWrap" MaxWidth="600"
+                       Foreground="#FFFFFFFF"
+                       TextTrimming="CharacterEllipsis"/>
+
+            <!-- 翻译：外层套裁剪容器 + 两层文字（正在显示的 / 刚被顶掉的），
+                 才能做出「从左往右把上一句翻译顶掉」的效果。 -->
+            <Grid x:Name="SubTransHost" Grid.Row="7" Margin="4,4,4,8"
+                  ClipToBounds="True" MinHeight="22">
+                <TextBlock x:Name="SubTranslationOut"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                           FontSize="15" TextAlignment="Center" TextWrapping="NoWrap"
+                           Foreground="#A6FFFFFF"
+                           Opacity="0" IsHitTestVisible="False"/>
+                <TextBlock x:Name="SubTranslation"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                           FontSize="15" TextAlignment="Center" TextWrapping="NoWrap"
+                           MaxHeight="26" TextTrimming="CharacterEllipsis"
+                           Foreground="#A6FFFFFF"/>
+            </Grid>
+        </Grid>
+
         <!-- 手动翻过歌词后的提示条。以前 IsHitTestVisible="False"，纯装饰，
-             只能干等 2.5 秒自动接回；用户想立刻回到当前句却没处点，
+             只能干等 3 秒自动接回；用户想立刻回到当前句却没处点，
              只好去把窗口关掉重开——这正是「每次要我关掉才跟随」的由来。
              现在做成可点的按钮：点一下立刻交回视口并继续跟随。 -->
         <Button x:Name="ResumeHint"

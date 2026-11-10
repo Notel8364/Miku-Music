@@ -1,0 +1,34 @@
+<Window x:Class="MusicBox.Controls.ConfirmDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Confirm"
+        Width="430" SizeToContent="Height"
+        WindowStyle="None" ResizeMode="NoResize"
+        AllowsTransparency="True" Background="Transparent"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+    <!-- 外边留一圈透明：要 AllowsTransparency 才能有圆角，而圆角外的四个角
+         必须是透明的，否则窗口矩形会在桌面上显出一块底色。
+         底色用 FlyoutBgBrush 而不是 CardBgBrush：后者是 #0DFFFFFF（alpha 只有 5%），
+         那是给「已经画好底色的页面里」叠一张卡片用的。这个窗口是浮在桌面上的独立
+         顶层窗口，背后什么都没有，5% 的白等于全透明，于是正文和后面的内容混在一起、
+         字都看不清。FlyoutBgBrush（#F21C1C1C，95% 不透明）才是浮层的底色，
+         歌词窗、搜索建议弹窗用的都是它，ThemeManager 切浅色主题时也会一起换。 -->
+    <Border x:Name="RootBorder" Margin="14" CornerRadius="12"
+            Background="{DynamicResource FlyoutBgBrush}"
+            BorderBrush="{DynamicResource FlyoutBorderBrush}" BorderThickness="1"
+            Padding="22,18,22,16">
+        <StackPanel>
+            <TextBlock x:Name="MessageText" FontSize="14" TextWrapping="Wrap"
+                       Foreground="{DynamicResource TextPrimaryBrush}" MaxWidth="386"/>
+            <CheckBox x:Name="DontAskCheckBox" Margin="0,16,0,0" FontSize="12.5"
+                      Cursor="Hand" Foreground="{DynamicResource TextSecondaryBrush}"
+                      Visibility="Collapsed"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
+                <Button x:Name="CancelButton" MinWidth="88" Padding="14,7" Margin="0,0,8,0"
+                        Style="{StaticResource GhostButtonStyle}" Click="CancelButton_Click"/>
+                <Button x:Name="ConfirmButton" MinWidth="88" Padding="14,7"
+                        Style="{StaticResource AccentButtonStyle}" Click="ConfirmButton_Click"/>
+            </StackPanel>
+        </StackPanel>
+    </Border>
+</Window>

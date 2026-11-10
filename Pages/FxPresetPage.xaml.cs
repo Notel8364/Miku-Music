@@ -97,9 +97,14 @@ public partial class FxPresetPage : UserControl, IMusicPage
 				IsChecked = info.Mode == selected,
 				Margin = new Thickness(0, 0, 0, 4),
 				FontSize = 12.5,
-				Foreground = ThemeManager.Primary(),
 				ToolTip = info.Hint
 			};
+			// 用 SetResourceReference 而不是 Foreground = ThemeManager.Primary()。
+			// 后者是一次快照：ThemeManager.Primary() 把当下那支画Brush取出来
+			// 直接赋过去，主题切换后这些控件还拿着旧颜色 —— 深色主题下看着正常，
+			// 切到浅色就成了白底白字（等于「字体全黑/看不见」这一类问题的另一种样子）。
+			// SetResourceReference 让控件自己跟着资源走，换主题即时生效。
+			btn.SetResourceReference(Control.ForegroundProperty, "TextPrimaryBrush");
 			btn.Checked += SurroundModeRadio_Checked;
 			SurroundModePanel.Children.Add(btn);
 
@@ -107,10 +112,10 @@ public partial class FxPresetPage : UserControl, IMusicPage
 			{
 				Text = info.Hint,
 				FontSize = 11,
-				Foreground = ThemeManager.Tertiary(),
 				TextWrapping = TextWrapping.Wrap,
 				Margin = new Thickness(22, 0, 0, 4)
 			};
+			hint.SetResourceReference(TextBlock.ForegroundProperty, "TextTertiaryBrush");
 			SurroundModePanel.Children.Add(hint);
 		}
 		UpdateSurroundModeHint(selected);
@@ -183,6 +188,13 @@ public partial class FxPresetPage : UserControl, IMusicPage
 			Mode = SurroundMode.Combined,
 			Title = "D · B + C 合并",
 			Hint = "Haas 后环绕与反馈回声叠加。空间感最夸张，也最容易听着发脏，用来做上限参考。"
+		},
+		new SurroundModeInfo
+		{
+			Mode = SurroundMode.HifiMerged,
+			Title = "模拟Hifi环绕 + B + D（回声为主）",
+			Hint = "同相 HIFI 加宽打底 + B 的 Haas/后环绕压到三成当空间垫 + D 的 110ms 反馈回声当主角（湿声 45%、反馈 0.44）。"
+				+ "三层叠加余量最小，所以总输出额外压低 16%。代码在 SurroundDsp.cs 的 ReadHifiMerged。"
 		}
 	};
 
@@ -214,10 +226,12 @@ public partial class FxPresetPage : UserControl, IMusicPage
 			{
 				Text = (g > 0 ? "+" : "") + g.ToString("0.#"),
 				FontSize = 10.5,
-				Foreground = ThemeManager.Secondary(),
 				HorizontalAlignment = HorizontalAlignment.Center,
 				Margin = new Thickness(0, 6, 0, 0)
 			};
+			// 同样是 SetResourceReference：EQ 数值和刻度也跟着主题走，
+			// 不靠 ThemeManager 的快照（原因见 BuildSurroundModePanel）。
+			val.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondaryBrush");
 			var slider = new Slider
 			{
 				Orientation = Orientation.Vertical,
@@ -233,10 +247,10 @@ public partial class FxPresetPage : UserControl, IMusicPage
 			{
 				Text = _eqLabels[b],
 				FontSize = 10.5,
-				Foreground = ThemeManager.Secondary(),
 				HorizontalAlignment = HorizontalAlignment.Center,
 				Margin = new Thickness(0, 3, 0, 0)
 			};
+			lbl.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondaryBrush");
 			col.Children.Add(slider);
 			col.Children.Add(val);
 			col.Children.Add(lbl);

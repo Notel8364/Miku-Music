@@ -3,6 +3,10 @@ bin/
 obj/
 .vs/
 
+# 发布输出（打包给用户的成品，不是源码）
+Release/
+Publish/
+
 # 旧的整包构建备份（不是源码）
 backups/
 

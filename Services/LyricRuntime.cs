@@ -21,6 +21,11 @@ public static class LyricRuntime
 	/// <summary>开关状态变了。用于通知主窗按钮换图标/高亮。</summary>
 	public static event Action? VisibilityChanged;
 
+	/// <summary>歌词外观（颜色等）设置改了之后在 RefreshAppearance 末尾触发。
+	/// 歌词窗自己会被推到，但全屏播放页里的那个歌词视图没人管，
+	/// MainWindow 订这个事件转过去。</summary>
+	public static event Action? AppearanceRefreshed;
+
 	/// <summary>歌词窗口当前是否开着（不是「功能是否开启」）。</summary>
 	public static bool IsWindowOpen => _window != null && _window.IsVisible;
 
@@ -49,8 +54,21 @@ public static class LyricRuntime
 		}
 	}
 
-	/// <summary>点底部按钮时用：开着就收起来，收起来就打开。</summary>
-	public static void Toggle() => Enabled = !Enabled;
+	/// <summary>点底部按钮时用：开着就收起来，收起来就打开。
+	///
+	/// 「开关记着开、窗口其实不在」的情况（进程被强杀后重启、窗口被系统
+	/// 收掉）不能先翻开关：那样第一次按只是把开关关掉，界面上什么都没发生，
+	/// 得按第二次才把窗口叫回来——用户报的「要按两次打开歌词」。
+	/// 这里先看窗口在不在，不在就直接补开。</summary>
+	public static void Toggle()
+	{
+		if (Enabled && !IsWindowOpen)
+		{
+			Show();
+			return;
+		}
+		Enabled = !Enabled;
+	}
 
 	/// <summary>打开歌词窗。</summary>
 	public static void Show()
@@ -131,6 +149,8 @@ public static class LyricRuntime
 		// 自定义歌词色也要跟着推。ApplyFontColor 内部已经会在
 		// 「没设自定义色」时把画刷还原成主题引用，所以清空颜色也走这一条。
 		_window?.ApplyFontColor();
+		// 全屏播放页的歌词视图也刷一遍
+		AppearanceRefreshed?.Invoke();
 	}
 
 	/// <summary>换动画模板后推一下歌词窗。

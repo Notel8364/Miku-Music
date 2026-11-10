@@ -11,9 +11,12 @@
         </Grid.RowDefinitions>
 
         <StackPanel Grid.Row="0" Margin="0,0,0,16">
-            <TextBlock Text="音乐库 / 视频" FontSize="28" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
-
-            <DockPanel Margin="0,14,0,0">
+            <!-- 「音乐库 / 视频」大标题删了：纯文字展示没有功能，页面信息
+                 全在左右两张卡片上，纵向空间让给歌曲列表和收藏夹。 -->
+            <!-- 本地路径行随视图收放：路径 / 选文件夹 / 刷新只对本地曲库有意义，
+                 收藏夹（在线）视图里它白占一行。收起/展开由代码走
+                 AnimateFolderBar 的滑动动画，这里保持默认可见（进页面就是本地视图）。 -->
+            <DockPanel x:Name="FolderBar">
                 <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
                     <Button x:Name="ChooseFolderButton" Content="选择音乐文件夹" Padding="14,8" Margin="6,0,0,0"
                             Click="ChooseFolderButton_Click"/>
@@ -25,29 +28,104 @@
             </DockPanel>
         </StackPanel>
 
-        <Border Grid.Row="1" Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1">
-            <DockPanel>
-                <DockPanel DockPanel.Dock="Top" Margin="14,12,14,8">
-                    <TextBlock x:Name="CountText" Text="音乐库 (0 首)" VerticalAlignment="Center" FontWeight="SemiBold"
-                               Foreground="{DynamicResource TextPrimaryBrush}" FontSize="14"/>
-                    <!-- 「保留关键词」：不勾时每次跳去别的页面再回来都从全部歌曲开始，
-                         勾上则记住这次的筛选词。默认不勾 —— 「看到一半去设置页回来看一眼
-                         结果列表突然全量了」比「每次都要重输一遍关键词」更让人困惑，
-                         但记住不记住是个人习惯，所以给个开关。 -->
-                    <CheckBox x:Name="KeepFilterCheckBox" DockPanel.Dock="Right" VerticalAlignment="Center"
-                              Margin="10,0,0,0" Content="保留关键词" FontSize="12.5" Cursor="Hand"
-                              Foreground="{DynamicResource TextSecondaryBrush}"
-                              ToolTip="勾上：跳去别的页面再回来，保留这次的筛选关键词&#10;不勾：每次跳转别的页面就清空筛选"
-                              Checked="KeepFilterCheckBox_Changed" Unchecked="KeepFilterCheckBox_Changed"/>
-                    <TextBox x:Name="SearchBox" Width="240" Height="30" HorizontalAlignment="Right"
-                             VerticalContentAlignment="Center" FontSize="13" TextChanged="SearchBox_TextChanged"
-                             ToolTip="输入关键字筛选，忽略空格和标点（搜 cu 能找到 C U Again）" DockPanel.Dock="Right"/>
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <!-- 收藏夹面板固定宽度：歌单名大多不长，宽度给到能放下
+                     「名字 + N 首」一行即可，剩下全让给歌曲列表。
+                     不用 Auto：面板内容是代码构建的，宽了窄了会随内容跳。 -->
+                <ColumnDefinition Width="296"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- 左侧：各平台账号的收藏夹（歌单分组）。内容全部由代码构建
+                 （账号状态、歌单条数、平台占位都动态），XAML 只给壳：
+                 标题行 + 滚动容器。底色用卡片同款（CardBgBrush），
+                 边框与右侧歌曲卡一致，两块并排看起来是一体的版面。 -->
+            <Border Grid.Column="0" Background="{DynamicResource CardBgBrush}" CornerRadius="10"
+                    BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1"
+                    Margin="0,0,10,0">
+                <DockPanel>
+                    <DockPanel DockPanel.Dock="Top" Margin="12,10,12,6">
+                        <Button x:Name="LoadPlaylistsButton" DockPanel.Dock="Right" Padding="10,5"
+                                FontSize="12" Click="LoadPlaylistsButton_Click"
+                                Content="加载收藏夹" ToolTip="拉取各平台账号下的歌单列表（只拉列表，曲目在点击歌单时才拉）"/>
+                        <TextBlock x:Name="PlaylistPanelTitle" Text="收藏夹" FontSize="14" FontWeight="SemiBold"
+                                   VerticalAlignment="Center" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                    </DockPanel>
+                    <!-- 分页页脚固定在左栏底部（原先追加在歌曲列表末尾跟着滚，
+                         列表一长翻页键就沉底看不见）。上：加载收藏夹按钮 + 歌单
+                         列表滚动区；下：这个固定页脚 —— 本地音乐 / 全部歌曲 /
+                         歌单三个视图共用，内容由代码 UpdatePaginationFooter 填充。 -->
+                    <Border x:Name="PaginationFooterHost" DockPanel.Dock="Bottom"
+                            Padding="10,6,10,8" Margin="0,0,0,4"
+                            BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="0,1,0,0"
+                            Visibility="Collapsed"/>
+                    <!-- ScrollViewer 挂了名字：平台分组头的吸顶（UpdateStickyPlaylistHeaders）
+                         拿它当坐标系，和「我的收藏」页是同一套算法。
+                         FocusVisualStyle 置空：滚轮/点击会让它拿到键盘焦点，
+                         WPF 默认那圈点状虚线正好画在吸顶组头上沿，看着就像
+                         「标题和组头之间漏出一排小字」。 -->
+                    <ScrollViewer x:Name="PlaylistScroll" VerticalScrollBarVisibility="Auto" Padding="0,0,2,0"
+                                  FocusVisualStyle="{x:Null}"
+                                  ScrollChanged="PlaylistScroll_ScrollChanged">
+                        <!-- 歌单条目、平台分组头、本地/全部入口都在这里由代码添加 -->
+                        <StackPanel x:Name="PlaylistHost" Margin="10,0,10,10"
+                                    LayoutUpdated="PlaylistHost_LayoutUpdated"/>
+                    </ScrollViewer>
                 </DockPanel>
+            </Border>
+
+            <Border Grid.Column="1" Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1">
+            <DockPanel>
+                <!-- 说明与搜索并成一行：标题贴左、搜索框贴右，一行解决
+                     （原来是两行，纵向空间浪费在纯排版的标题行上）。
+                     窗口较窄时标题与搜索框可能相碰 —— 搜索框组有
+                     MinWidth 由布局裁剪，标题文本短，实际挤不上去。 -->
+                <Grid DockPanel.Dock="Top" Margin="14,12,14,8">
+                    <TextBlock x:Name="CountText" Text="音乐库 (0 首)" FontWeight="SemiBold"
+                               Foreground="{DynamicResource TextPrimaryBrush}" FontSize="14"
+                               HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                    <!-- 筛选框贴右、固定 320px，与列表卡片右缘对齐。
+                         「保留关键词」勾选框已删除——行为固定为不保留：
+                         跳去别的页面再回来一律从全部歌曲开始，上次会话的关键词
+                         不再带入（原先的开关把一个低频偏好抬成了一行常驻 UI）。 -->
+                    <!-- 清除键：套在搜索框外面而不是 TextBox 自带的模板里，
+                         这样不用重写 TextBox 模板（重写就得把光标、
+                         选区、占位符那套行为全重新实现一遍）。
+                         放在 Grid 里叠在输入框右侧，点它先把焦点抢回来，
+                         否则 TextBox 立刻失焦、Placeholder 冒出来挡着按钮。 -->
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                        <Grid Height="30" Width="320" HorizontalAlignment="Left">
+                            <TextBox x:Name="SearchBox" HorizontalAlignment="Stretch"
+                                     VerticalContentAlignment="Center" FontSize="13"
+                                     TextChanged="SearchBox_TextChanged" KeyDown="SearchBox_KeyDown"
+                                     Padding="8,0,28,0"
+                                     ToolTip="输入关键字后按回车筛选，Esc 清空恢复全部；忽略空格和标点（搜 cu 能找到 C U Again）"/>
+                            <Button x:Name="ClearSearchButton" Width="24" Height="24" Padding="0"
+                                    MinWidth="0" MinHeight="0"
+                                    HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,3,0"
+                                    Visibility="Collapsed" Click="ClearSearchButton_Click"
+                                    ToolTip="清除">
+                                <TextBlock Text="&#xE711;" FontFamily="Segoe MDL2 Assets" FontSize="11"/>
+                            </Button>
+                        </Grid>
+                        <!-- 确认键：与输入框同高、紧跟其右。点它或按 Enter 都执行筛选
+                             （Enter 在 SearchBox_KeyDown 里，两条路殊途同归）。
+                             默认按钮样式自带主题底色与 200ms 过渡，不加自定义动画。 -->
+                        <Button x:Name="CommitFilterButton" Width="30" Height="30" Margin="6,0,0,0"
+                                Padding="0" MinWidth="0" MinHeight="0"
+                                VerticalAlignment="Center" Click="CommitFilterButton_Click"
+                                ToolTip="应用筛选（Enter）">
+                            <TextBlock Text="&#xE73E;" FontFamily="Segoe MDL2 Assets" FontSize="13"/>
+                        </Button>
+                    </StackPanel>
+                </Grid>
                 <ListBox x:Name="LibraryListBox" BorderThickness="0" Background="Transparent" Padding="6"
                          SelectionMode="Single"
                          HorizontalContentAlignment="Stretch"
                          ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                          ScrollViewer.VerticalScrollBarVisibility="Auto"
+                         ScrollViewer.CanContentScroll="False"
                          MouseDoubleClick="LibraryListBox_MouseDoubleClick"
                          ContextMenuOpening="LibraryListBox_ContextMenuOpening">
                     <ListBox.ItemContainerStyle>
@@ -75,11 +153,13 @@
                         <ContextMenu>
                             <MenuItem Header="播放" Click="ContextPlay_Click"/>
                             <MenuItem Header="标记/取消跳过" Click="ContextToggleSkip_Click"/>
+                            <MenuItem Header="删除（同时删文件）" Click="ContextDelete_Click"/>
                         </ContextMenu>
                     </ListBox.ContextMenu>
                 </ListBox>
             </DockPanel>
-        </Border>
+            </Border>
+        </Grid>
 
     </Grid>
 </UserControl>

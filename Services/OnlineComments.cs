@@ -8,6 +8,10 @@ namespace MusicBox.Services;
 
 public sealed class OnlineComment
 {
+	/// <summary>平台侧的评论 id（B 站 rpid、网易云 commentId）。
+	/// 「展开回复」要用它当根评论 id 去找子回复，没有就展不开。</summary>
+	public long Id { get; set; }
+
 	public string User { get; set; } = "";
 
 	public string Content { get; set; } = "";
@@ -239,6 +243,130 @@ public static class OnlineComments
 		return page;
 	}
 
+	// ---------- 评论总数（给「按评论数排序」用）----------
+
+	/// <summary>评论总数，按「平台+id」缓存。
+	/// 同一个 id 反复排序 / 反复渲染时只问一次接口。</summary>
+	private static readonly Dictionary<string, long> TotalCache = new Dictionary<string, long>();
+
+	/// <summary>取评论总数，取不到返回 null（不是 0）。
+	///
+	/// 网易云的搜索结果里根本没有评论数（cloudsearch 只给 id/fee/pop），
+	/// 但评论接口的 limit=1 只要总数、正文一个字都不返回，
+	/// 一首歌一个请求，比拉整页评论便宜得多。
+	/// 这个请求只在用户真的勾了「按评论数排序」时才发，
+	/// 不然每页 30 个请求只为排个序，太不划算。
+	/// </summary>
+	public static async Task<long?> FetchTotalAsync(string source, object track)
+	{
+		string key = source + ":" + TrackId(track);
+		if (key.Length > 1 && key[1] == ':' && key.Length > 2 && TotalCache.TryGetValue(key, out long hit))
+		{
+			return hit;
+		}
+		try
+		{
+			if (source == "netease" && track is NeteaseTrack n)
+			{
+				string url = $"https://music.163.com/api/v1/resource/comments/R_SO_4_{n.Id}?limit=1&offset=0";
+				string json = await Http.GetStringAsync(url);
+				using var doc = JsonDocument.Parse(json);
+				if (doc.RootElement.TryGetProperty("total", out var tot) && tot.ValueKind == JsonValueKind.Number)
+				{
+					long total = tot.GetInt64();
+					TotalCache[key] = total;
+					return total;
+				}
+			}
+			else if (source == "bili" && track is BiliTrack b)
+			{
+				string url = $"https://api.bilibili.com/x/v2/reply/main?type=1&oid={b.Aid}&mode=3&next=1";
+				string json = await Http.GetStringAsync(url);
+				using var doc = JsonDocument.Parse(json);
+				if (doc.RootElement.TryGetProperty("data", out var data)
+					&& data.TryGetProperty("page", out var page)
+					&& page.TryGetProperty("count", out var cnt) && cnt.ValueKind == JsonValueKind.Number)
+				{
+					long total = cnt.GetInt64();
+					TotalCache[key] = total;
+					return total;
+				}
+			}
+		}
+		catch (Exception ex)
+		{
+			LogHelper.LogDebug("取评论总数失败: " + source + " " + ex.Message);
+		}
+		return null;
+	}
+
+	private static string TrackId(object track) => track switch
+	{
+		NeteaseTrack n => n.Id.ToString(),
+		BiliTrack b => b.Aid.ToString(),
+		QqTrack q => q.Mid,
+		KugouTrack k => k.Hash,
+		_ => ""
+	};
+
+	/// <summary>拉某条评论下面的回复（点「展开 N 条回复」时用）。
+	///
+	/// 主列表接口只在每条评论里内嵌前几条回复，剩下的要单独问。
+	/// 返回空列表表示「没有回复」或「接口没给」，调用方按前者处理，
+	/// 不能当成失败弹错误 —— 用户点开发现 0 条是正常结果。
+	/// </summary>
+	public static async Task<List<OnlineComment>> FetchSubRepliesAsync(string source, object track, long rootId)
+	{
+		var list = new List<OnlineComment>();
+		if (rootId <= 0)
+		{
+			return list;
+		}
+		try
+		{
+			if (source == "bili" && track is BiliTrack b)
+			{
+				string url = $"https://api.bilibili.com/x/v2/reply/reply?type=1&oid={b.Aid}&root={rootId}&pn=1&ps=20";
+				string json = await Http.GetStringAsync(url);
+				using var doc = JsonDocument.Parse(json);
+				if (doc.RootElement.TryGetProperty("data", out var data)
+					&& data.TryGetProperty("replies", out var replies)
+					&& replies.ValueKind == JsonValueKind.Array)
+				{
+					foreach (var item in replies.EnumerateArray())
+					{
+						OnlineComment? sub = ParseBiliReply(item);
+						if (sub != null)
+						{
+							list.Add(sub);
+						}
+					}
+				}
+			}
+			else if (source == "netease" && track is NeteaseTrack n)
+			{
+				string url = "https://music.163.com/api/v2/resource/comment/reply/get"
+					+ $"?resourceId=R_SO_4_{n.Id}&resourceType=0&parentCommentId={rootId}&limit=20&offset=0";
+				string json = await Http.GetStringAsync(url);
+				using var doc = JsonDocument.Parse(json);
+				if (doc.RootElement.TryGetProperty("hotComments", out var hot) && hot.ValueKind == JsonValueKind.Array)
+				{
+					ReadNetease(hot, list);
+				}
+				if (doc.RootElement.TryGetProperty("comments", out var comments)
+					&& comments.ValueKind == JsonValueKind.Array)
+				{
+					ReadNetease(comments, list);
+				}
+			}
+		}
+		catch (Exception ex)
+		{
+			LogHelper.LogDebug("取回复失败: " + source + " " + ex.Message);
+		}
+		return list;
+	}
+
 	private static async Task<Page> FetchNeteasePageAsync(long id, string cursor)
 	{
 		var page = new Page();
@@ -296,6 +424,11 @@ public static class OnlineComments
 			Content = BiliClient.StripHtml(msg),
 			Time = FormatTime(ts)
 		};
+
+		if (item.TryGetProperty("rpid", out var rpid) && rpid.ValueKind == JsonValueKind.Number)
+		{
+			r.Id = rpid.GetInt64();
+		}
 
 		if (item.TryGetProperty("like", out var like) && like.ValueKind == JsonValueKind.Number)
 		{
@@ -356,6 +489,10 @@ public static class OnlineComments
 				? t.GetInt64() : 0;
 			if (string.IsNullOrWhiteSpace(msg)) continue;
 			var c = new OnlineComment { User = uname, Content = msg, Time = FormatTime(ts) };
+			if (item.TryGetProperty("commentId", out var cid) && cid.ValueKind == JsonValueKind.Number)
+			{
+				c.Id = cid.GetInt64();
+			}
 			if (item.TryGetProperty("likedCount", out var liked) && liked.ValueKind == JsonValueKind.Number)
 			{
 				c.Likes = liked.GetInt64();

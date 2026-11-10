@@ -19,11 +19,11 @@
          <Version> 会同时填 AssemblyVersion / FileVersion / InformationalVersion，
          而关于页读的就是 InformationalVersion，所以这里改一次三处都跟着变。
          不写的话全默认 1.0.0，关于页就一直显示 v1.0.0。 -->
-    <Version>2.1.0</Version>
+    <Version>3.7.0</Version>
 
-    <!-- 调试构建不要被 2.1.0 这类正式版本号污染：
+    <!-- 调试构建不要被正式版本号污染：
          打开文件属性看到的还是「开发中」，免得拿一个 Debug 包当成发布版发出去。 -->
-    <Version Condition="'$(Configuration)' == 'Debug'">2.1.0-dev</Version>
+    <Version Condition="'$(Configuration)' == 'Debug'">3.7.0-dev</Version>
 
     <!-- 发布设置。PublishSingleFile 保持关闭：BBDown.exe 被标了
          ExcludeFromSingleFile，塞进单文件会让下载器在运行时被解包到临时目录，
@@ -38,6 +38,7 @@
   <ItemGroup>
     <PackageReference Include="NAudio" Version="2.2.1" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
+    <PackageReference Include="QRCoder" Version="1.8.1" />
   </ItemGroup>
 
   <ItemGroup>

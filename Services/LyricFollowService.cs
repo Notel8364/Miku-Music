@@ -71,6 +71,17 @@ public sealed class LyricFollowService : IDisposable
 		return await FetchAsync(path, ct);
 	}
 
+	/// <summary>只查缓存、不碰网络也不清 _missing。进全屏时先同步推一把：
+	/// 上一次拉成过的歌词立刻上屏，不给用户看空白窗口等网络。</summary>
+	public LyricBundle? TryGetCached(string path)
+	{
+		if (string.IsNullOrWhiteSpace(path))
+		{
+			return null;
+		}
+		return Cache.TryGetValue(path, out LyricBundle? hit) ? hit : null;
+	}
+
 	/// <summary>手动重试：把「查不到」的记录清掉再拉一次。用户点了歌名还是没歌词时会用。</summary>
 	public async Task<LyricBundle?> RetryAsync(string path, CancellationToken ct = default)
 	{
@@ -85,38 +96,158 @@ public sealed class LyricFollowService : IDisposable
 		IsLoading = true;
 		// 定位信息在拉网络之前就取好：网络等待期间可能已经切歌，
 		// 那时 MusicService 里的元数据属于新歌，拿它去搜就串台了。
-		LyricMatchContext ctx = MusicService.CurrentLyricContext;
+		LyricMatchContext primary = MusicService.CurrentLyricContext;
 		LogHelper.LogDebug($"开始拉歌词: {Path.GetFileName(path)} "
-			+ $"ctx='{ctx.Title}' artist='{ctx.Artist}' src={ctx.Platform}:{ctx.PlatformId} dur={ctx.DurationMs}ms");
+			+ $"ctx='{primary.Title}' artist='{primary.Artist}' src={primary.Platform}:{primary.PlatformId} dur={primary.DurationMs}ms");
 		try
 		{
-			long? id = await NeteaseApiClient.ResolveSongIdAsync(ctx, ct);
+			// 按平台路由歌词源，全部按「歌名+歌手」对齐去搜：
+			//   netease = 网易云直连 ID/反查，失败回 LRCLIB；
+			//   qq      = QQ 歌词（songmid），失败回 LRCLIB；
+			//   kugou   = 酷狗歌词（hash），失败回 LRCLIB；
+			//   bili / 本地文件 = 继续网易云反查，失败回 LRCLIB。
+			string platform = primary.Platform ?? "";
+			long? id = null;
+			LyricBundle? bundle = null;
+			LyricMatchContext used = primary;
+			bool fromPlatform = false;
+			string platformName = "";
+			// 歌词/封面各自来自哪个平台，底栏的双色框按它上色
+			MatchSource lyricSource = MatchSource.None;
+
+			// ① 平台直取：qq/kugou 带 songmid/hash，直接用 ID 拿歌词，
+			//    省掉一次搜索，也避免搜到别的版本。
+			if (string.Equals(platform, "qq", StringComparison.OrdinalIgnoreCase)
+				&& !string.IsNullOrWhiteSpace(primary.PlatformId))
+			{
+				bundle = await QqClient.GetLyricBundleAsync(primary.PlatformId!, ct);
+				platformName = "QQ";
+				fromPlatform = bundle != null && bundle.Count > 0;
+				if (fromPlatform)
+				{
+					lyricSource = MatchSource.Qq;
+					// 拿到了就立刻记来源：后面的翻译补全还要再走一轮网络，
+					// 那一轮再慢/出错也不该让左半圈一直空着。
+					bundle!.LyricSource = lyricSource;
+					MusicService.NoteMatchSource(path, lyric: lyricSource);
+				}
+			}
+			else if (string.Equals(platform, "kugou", StringComparison.OrdinalIgnoreCase)
+				&& !string.IsNullOrWhiteSpace(primary.PlatformId))
+			{
+				bundle = await KugouClient.GetLyricBundleAsync(primary.PlatformId!, ct);
+				platformName = "酷狗";
+				fromPlatform = bundle != null && bundle.Count > 0;
+				if (fromPlatform)
+				{
+					lyricSource = MatchSource.Other;
+					bundle!.LyricSource = lyricSource;
+					MusicService.NoteMatchSource(path, lyric: lyricSource);
+				}
+			}
+
 			if (ct.IsCancellationRequested || gen != _generation)
 			{
 				return null;
 			}
-			LyricBundle? bundle = null;
-			bool fromNetease = false;
-			if (id == null)
+
+			// ② 平台直取没捞到（或来源不是 qq/kugou），按候选歌名依次去网易云搜。
+			//    多个候选是为了对付「文件名解析出来的歌手是错的」——网易云歌手
+			//    对不上就宁可不给，这时换成不带歌手的候选往往就能搜到。命中即止。
+			//    这一步同时替代了老代码里「qq/kugou 失败再单独反查一次」的分支，
+			//    netease/本地/B站 也走同一条，逻辑只有一份。
+			if (bundle == null || bundle.Count == 0)
 			{
-				// 匹配不到网易云 ID 不等于没歌词。少了这一段分支，
-				// LRCLIB 这个兜底源在「网易云没有这首歌」时永远没机会上场，
-				// 而这恰恰是它最有用的场景之一（冷门/B 站下载的曲子）。
-				LogHelper.LogDebug("没有匹配到网易云歌曲ID，改用 LRCLIB: " + ctx.Title);
-			}
-			else
-			{
-				bundle = await NeteaseApiClient.GetLyricBundleAsync(id.Value, ct);
-				if (ct.IsCancellationRequested || gen != _generation)
+				foreach (LyricMatchContext cand in MusicService.CurrentLyricCandidates)
 				{
-					return null;
+					if (ct.IsCancellationRequested || gen != _generation)
+					{
+						return null;
+					}
+					NeteaseTrack? hit = await NeteaseApiClient.ResolveTrackAsync(cand, ct);
+					if (ct.IsCancellationRequested || gen != _generation)
+					{
+						return null;
+					}
+					if (hit == null)
+					{
+						continue;
+					}
+					id = hit.Id;
+					var nb = await NeteaseApiClient.GetLyricBundleAsync(hit.Id, ct);
+					if (ct.IsCancellationRequested || gen != _generation)
+					{
+						return null;
+					}
+					if (nb != null && nb.Count > 0)
+					{
+						bundle = nb;
+						used = cand;
+						platformName = "网易云";
+						fromPlatform = true;
+						lyricSource = MatchSource.Netease;
+						nb.LyricSource = lyricSource;
+						MusicService.NoteMatchSource(path, lyric: lyricSource);
+						ApplyMatchedCover(path, hit);
+						break;
+					}
 				}
-				fromNetease = bundle != null && bundle.Count > 0;
 			}
-			// 网易云只有行级时间轴，而且 tlyric 经常是空的。
+
+			// ③ 网易云没出货 → 换 QQ 音乐再搜一遍（顺序固定：先网易云后 QQ）。
+			//    网易云的曲库和歌词在某些歌上就是缺的（尤其日语/同人曲），
+			//    这时 QQ 往往有，而且它的封面是公开 CDN，不需要登录。
+			if (bundle == null || bundle.Count == 0)
+			{
+				QqPick pick = await TryQqAsync(path, ct, gen);
+				if (pick.Bundle != null && pick.Bundle.Count > 0)
+				{
+					bundle = pick.Bundle;
+					used = pick.Used;
+					platformName = "QQ音乐";
+					fromPlatform = true;
+					lyricSource = MatchSource.Qq;
+					// 同上：拿到歌词的当下就落来源，不等后面的补齐流程。
+					bundle.LyricSource = lyricSource;
+					MusicService.NoteMatchSource(path, lyric: lyricSource);
+				}
+			}
+
+			// ④ 歌词有了但封面还空着：只去 QQ 补一张封面，不动歌词。
+			//    网易云那首歌的专辑图可能压根没有（PicUrl 为空），
+			//    这时左右两半就会是「红（歌词=网易云）+ 绿（封面=QQ）」。
+			//    在线歌自带封面，这里只在真的没有封面时才去问 QQ，别白跑一趟。
+			if (bundle != null && bundle.Count > 0)
+			{
+				SavedTrack? cur = MusicService.BuildCurrentTrack();
+				if (string.IsNullOrWhiteSpace(cur?.Cover)
+					&& string.IsNullOrEmpty(MusicService.GetLocalMatchedCover(path)))
+				{
+					await TryQqAsync(path, ct, gen, coverOnly: true);
+				}
+			}
+
+			// 平台源只有行级时间轴，而且翻译经常是空的。
 			// 这时候再去 LRCLIB 补一次：它覆盖面更广，还带翻译。
-			bundle = await FillGapsAsync(bundle, ctx, ct);
-			string source = fromNetease ? "网易云+LRCLIB" : "LRCLIB";
+			// 用「命中的那个候选」去查，别拿错的歌手把 LRCLIB 也带偏。
+			if (ct.IsCancellationRequested || gen != _generation)
+			{
+				return null;
+			}
+			bool hadLyrics = bundle != null && bundle.Count > 0;
+			bundle = await FillGapsAsync(bundle, used, ct);
+			// 走到 LRCLIB 才有的歌词：既不是网易云也不是 QQ，界面上那一半画灰。
+			if (!hadLyrics && bundle != null && bundle.Count > 0 && lyricSource == MatchSource.None)
+			{
+				lyricSource = MatchSource.Other;
+			}
+			// 来源一定要落在歌词包上：FillGaps 可能换回一个新包（整首来自 LRCLIB），
+			// 那时候只有这个新包身上有来源信息，丢了就得靠下面的界面兜底去猜。
+			if (bundle != null && bundle.Count > 0 && bundle.LyricSource == MatchSource.None)
+			{
+				bundle.LyricSource = lyricSource;
+			}
+			string source = fromPlatform ? platformName + "+LRCLIB" : "LRCLIB";
 			if (ct.IsCancellationRequested || gen != _generation)
 			{
 				return null;
@@ -124,14 +255,20 @@ public sealed class LyricFollowService : IDisposable
 			if (bundle == null || bundle.Count == 0)
 			{
 				MarkMissing(path);
-				LogHelper.LogDebug("两个源都没匹配到歌词: " + ctx.Title);
+				LogHelper.LogDebug("两个源都没匹配到歌词: " + used.Title);
 				return null;
 			}
+			// 记下「匹配到歌词的音乐名」，沉浸页标题只显示这个。
+			bundle.DisplayTitle = string.IsNullOrWhiteSpace(used.Title) ? null : used.Title;
+			bundle.DisplayArtist = string.IsNullOrWhiteSpace(used.Artist) ? null : used.Artist;
 			LastError = null;
+			// 先把来源记上再入缓存：界面随时可能来读，两边看到的状态要一致。
+			MusicService.NoteMatchSource(path, lyric: lyricSource);
+			SyncTimeScale(bundle, used);
 			Put(path, bundle);
 			int withTr = bundle.Lines.Count(l => !string.IsNullOrWhiteSpace(l.Translation));
 			int withChar = bundle.Lines.Count(l => l.CharStarts != null);
-			LogHelper.LogDebug($"歌词就绪: {ctx.Title} id={id} "
+			LogHelper.LogDebug($"歌词就绪: {used.Title} artist={used.Artist} id={id} "
 				+ $"行数={bundle.Count} 带翻译={withTr} 带字级={withChar} 源={source}");
 			return bundle;
 		}
@@ -152,6 +289,61 @@ public sealed class LyricFollowService : IDisposable
 				IsLoading = false;
 			}
 		}
+	}
+
+	/// <summary>本地文件按文件名命中网易云后，把那一版更准的歌名/歌手和专辑封面
+	/// 记到 MusicService；沉浸页的音乐图标就会换成专辑图。</summary>
+	private static void ApplyMatchedCover(string path, NeteaseTrack hit)
+	{
+		string cover = hit.AlbumInfo?.PicUrl ?? "";
+		if (string.IsNullOrWhiteSpace(cover))
+		{
+			return;
+		}
+		MusicService.ApplyLocalMatchedMeta(path, hit.Name, hit.ArtistNames, cover, MatchSource.Netease);
+	}
+
+	private readonly record struct QqPick(LyricBundle? Bundle, LyricMatchContext Used);
+
+	/// <summary>按候选歌名去 QQ 音乐搜一遍：命中就把封面记下来，
+	/// 不是「只要封面」的模式还会顺便取歌词。
+	/// 命中即止，候选一个个试（和网易云那条路的写法一致）。</summary>
+	private async Task<QqPick> TryQqAsync(string path, CancellationToken ct, int gen, bool coverOnly = false)
+	{
+		foreach (LyricMatchContext cand in MusicService.CurrentLyricCandidates)
+		{
+			if (ct.IsCancellationRequested || gen != _generation)
+			{
+				return default;
+			}
+			QqTrack? hit = await QqClient.ResolveTrackAsync(cand, ct);
+			if (ct.IsCancellationRequested || gen != _generation)
+			{
+				return default;
+			}
+			if (hit == null)
+			{
+				continue;
+			}
+			// 命中就先把封面记上：QQ 的专辑图是公开 CDN，不登录也能取，
+			// 就算歌词拿不到，这一趟也不算白跑（底栏右半边会变绿）。
+			MusicService.ApplyLocalMatchedMeta(path, hit.Name, hit.Singer, hit.CoverUrl, MatchSource.Qq);
+			if (coverOnly)
+			{
+				return new QqPick(null, cand);
+			}
+			LyricBundle? qb = await QqClient.GetLyricBundleAsync(hit.Mid, ct);
+			if (ct.IsCancellationRequested || gen != _generation)
+			{
+				return default;
+			}
+			if (qb != null && qb.Count > 0)
+			{
+				LogHelper.LogDebug($"QQ音乐匹配到歌词: {hit.Name} mid={hit.Mid} 行数={qb.Count}");
+				return new QqPick(qb, cand);
+			}
+		}
+		return default;
 	}
 
 	/// <summary>用 LRCLIB 补齐网易云缺的部分：
@@ -273,6 +465,42 @@ public sealed class LyricFollowService : IDisposable
 		_ = RefreshAsync(path, _generation);
 	}
 
+	/// <summary>按真在播的音频时长，把歌词时间轴整体换算一遍。
+	///
+	/// 为什么要这一步：歌词时间戳是按「歌词来源那一版」的时长记的，而真在播的
+	/// 文件时长可能完全是另一回事（B 站下的版本、别的版本、母带长度不同）。
+	/// 两者一对不上，时间差会随进度越滚越大——开头还对，播到一半整屏错开，
+	/// 一拖进度条更是「秒跳一句」。
+	///
+	/// 期望值优先取歌曲元数据时长（歌词就是按它去搜/去挑版本的），
+	/// 没有就退回歌词自己的时间轴终点。改动的百分比太小（&lt;2%）不动它，
+	/// 免得为了几十毫秒的误差把整条轴搅乱。
+	/// 幂等：每次都从零重算，重复调用不会叠加。</summary>
+	private static void SyncTimeScale(LyricBundle? bundle, LyricMatchContext ctx)
+	{
+		if (bundle == null || bundle.Count == 0)
+		{
+			return;
+		}
+		long actual = 0;
+		try
+		{
+			// 解码器刚接上时可能还没有时长，这时算不了，等歌词送到界面时再补一次。
+			actual = (long)MusicService.Duration.TotalMilliseconds;
+		}
+		catch
+		{
+			actual = 0;
+		}
+		long expected = ctx.DurationMs > 0 ? ctx.DurationMs : bundle.TimelineEndMs;
+		if (!bundle.ApplyDurationScale(actual, expected))
+		{
+			return;
+		}
+		LogHelper.LogDebug($"歌词按实际时长换算: {ctx.Title} 期望={expected}ms "
+			+ $"实际={actual}ms 比例={bundle.TimeScale:0.000}");
+	}
+
 	private async Task RefreshAsync(string path, int gen)
 	{
 		LyricBundle? bundle = await GetAsync(path, _stop.Token);
@@ -280,6 +508,9 @@ public sealed class LyricFollowService : IDisposable
 		{
 			return;
 		}
+		// 拉歌词时播放器可能还没报出时长（在线歌要先下载/解码完），
+		// 所以送出给界面前再补一次换算。
+		SyncTimeScale(bundle, MusicService.CurrentLyricContext);
 		LyricsChanged?.Invoke(bundle);
 	}
 

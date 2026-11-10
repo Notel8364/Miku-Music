@@ -11,6 +11,7 @@ using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
+using MusicBox.Pages;
 using MusicBox.Services;
 using MusicBox.Settings;
 
@@ -51,9 +52,18 @@ public partial class LyricWindow : Window
 	/// 所以必须是字段而不是再去问设置（设置可能被别的线程写过）。</summary>
 	private bool _passthrough;
 
+	/// <summary>穿透态深色着色是否生效。切句动画、画刷还原定时器都要避让它，
+	/// 否则会把深色着色冲掉、穿透态下字又变回白色。详见 ApplyPassthroughTint。</summary>
+	private bool _passthroughTint;
+
 	/// <summary>标题栏当前是否亮着。用它做 RevealButtonBar 的短路，
 	/// 免得鼠标停在热区里时每一帧都重启一遍淡入动画。</summary>
 	private bool _barVisible;
+
+	/// <summary>横竖排模式缓存。OnTick（45Hz）、渲染帧钩子、布局回调都在读它，
+	/// 每次都去 SettingsManager 拿对象没必要。竖/横切换键撤掉后设置没有
+	/// 运行时写点（构造时初始化一次），所以字段缓存不会和设置脱钩。</summary>
+	private bool _vertical;
 
 	/// <summary>穿透态下靠轮询光标位置来发现「鼠标扫进窗口了」。
 	///
@@ -86,6 +96,14 @@ public partial class LyricWindow : Window
 	private TranslateTransform? _prevShift;
 	private TranslateTransform? _curShift;
 	private TranslateTransform? _nextShift;
+
+	/// <summary>上移那一格里每行各自的缩放。
+	/// 正在唱的那句升进中间时从 SelectFromScale 放大到 1；
+	/// 唱完退到「上一句」那格时从 PrevShrinkFrom 缩回 1（当前句复用 _curScale）。
+	/// 用缩放而不是直接改字号：改字号会连着改布局，一帧一次重排；
+	/// 而缩放只动 RenderTransform，每行仍然待在自己的格子里，横向永远居中对齐。</summary>
+	private ScaleTransform? _prevScale;
+	private ScaleTransform? _nextScale;
 
 	/// <summary>当前生效的动画模板。每次切句时重新取（Resolve 有缓存式的短路，
 	/// 而且读设置很快）；不缓存成字段是故意的：设置里换模板后
@@ -146,14 +164,20 @@ public partial class LyricWindow : Window
 
 
 		AppSettings s = SettingsManager.Instance;
-		ModeButton.IsChecked = s.LyricWindowVertical;
+		_vertical = s.LyricWindowVertical;
 		TranslationButton.IsChecked = s.LyricShowTranslation;
 		PassthroughButton.IsChecked = s.LyricWindowClickThrough;
 		Topmost = s.LyricWindowTopmost;
 		VerticalView.ShowTranslation = s.LyricShowTranslation;
 		ApplyFontFamily(s.LyricFontFamily);
 		ApplyFontColor();
-		ApplyMode(s.LyricWindowVertical);
+		ApplyMode(_vertical);
+		// 底部播放键的图标要先摆对，否则刚显示出来的一瞬间
+		// 是一支「播放」三角在放歌，看起来像暂停键按了没用。
+		UpdatePlayGlyph();
+		MusicService.StateChanged += OnMusicStateChanged;
+		// 切界面语言后重刷弹窗里代码赋值的字（状态行、竖排那句提示）。
+		Loc.Default.LanguageChanged += OnLanguageChanged;
 
 		ApplySavedBounds(s);
 		ApplyPassthrough(s.LyricWindowClickThrough);
@@ -171,6 +195,13 @@ public partial class LyricWindow : Window
 		_follow = LyricRuntime.Follow;
 		_follow.LyricsChanged += OnLyricsChanged;
 		Closed += OnClosed;
+		// 拖动的窗口级订阅只挂一次（构造时）。原来这三行被误粘在右键菜单的
+		// 「置顶」lambda 里：结果是没切过置顶就拖不动窗口，而且每切一次
+		// 叠加一份订阅（_dragging 挡得住重复计算，挡不住订阅堆积）。
+		// 抓鼠标抓在窗口上（BeginDrag），移动/抬手/丢捕获就得挂在窗口级。
+		MouseMove += DragBar_MouseMove;
+		MouseLeftButtonUp += DragBar_MouseLeftButtonUp;
+		LostMouseCapture += DragBar_LostMouseCapture;
 		// 隐藏时停动画。挂在 IsVisibleChanged 上而不是在每个 Hide() 调用点里写，
 		// 是因为隐藏有四条路：X、Esc、底部开关、主窗最小化带过来的。
 		// 漏掉任何一条的后果都一样——窗口看不见了，两个 45Hz 计时器还在烧 CPU。
@@ -183,6 +214,10 @@ public partial class LyricWindow : Window
 			else if (e.NewValue is bool v2 && v2)
 			{
 				SyncAnimationSources();
+				// 重新显示时把键位复位成「默认收起、悬停显示」：
+				// Hide 之前键位可能正亮着（鼠标压在窗口上时收的），
+				// 直接 Show 会把一排按钮留在屏幕上，直到鼠标再动一下。
+				ApplyHoverReveal();
 			}
 		};
 	}
@@ -257,39 +292,119 @@ public partial class LyricWindow : Window
 		}
 	}
 
-	/// <summary>用户在设置里给歌词挑的当前行颜色。空 = 跟随主题。
-	/// 挑了色就整句用这个色（含擦除的底色层），不再做「暗→亮」的颜色过渡——
-	/// 用户既然明确指定了颜色，动画再把它压暗一下会显得没生效。</summary>
+	/// <summary>用户在设置里给歌词挑的颜色。空 = 跟随主题。
+	///
+	/// 两个色各管一层当前句：
+	/// - <see cref="HorizCurLit"/> 是「已经唱过的那一段」，由擦除进度露出，
+	///   对应设置里的「已唱歌词颜色」；
+	/// - <see cref="HorizCurBase"/> 是「还没唱到的那一段」，铺满整句当底衬，
+	///   对应设置里的「歌词颜色」（未唱/底衬）和「已唱歌词颜色」。
+	///
+	/// 两个色都空 = 跟随主题；只给一个 = 另一层还是主题色。
+	/// 挑了就原样用，不做压暗——压暗是为了「只有一个颜色时让两层看得出区别」，
+	/// 现在两层各有各的设置，再自作主张改一层会显得没生效。
+	///
+	/// 第三个色是译文行：<see cref="HorizTranslation"/> 和被顶掉的
+	/// <see cref="HorizTranslationOut"/> 共用同一支笔，空 = 主题次级灰；
+	/// 两层同色是必须的，推挤动画期间旧译文跟新译文不同色会闪一下。
+	///
+	/// 顺带把竖排也推一遍：竖排（默认模式）以前完全不看这两个设置，
+	/// 于是「换了颜色竖排还是老样子」。见 <see cref="LyricView.ApplyColors"/>。</summary>
 	internal void ApplyFontColor()
 	{
 		try
 		{
-			string? hex = SettingsManager.Instance.LyricFontColor;
-			if (string.IsNullOrWhiteSpace(hex))
+			string? litHex = SettingsManager.Instance.LyricSungColor;
+			string? baseHex = SettingsManager.Instance.LyricFontColor;
+
+			// 壁纸亮度决定「挑的颜色在当前桌面上读不读得清」：
+			// 浅色壁纸正常、黑壁纸糊成一团，就是没管对比度。这里把三层颜色
+			// 都按壁纸亮度往可读方向推（色相不动，只提亮/压暗）；
+			// 壁纸亮度取不到（纯色背景等）时 EnsureReadable 原样返回，行为不变。
+			double bgLum = LyricBgSense.DesktopLuminance();
+
+			if (string.IsNullOrWhiteSpace(litHex))
 			{
-				// 还原成主题资源引用，色值和换主题都重新跟着走
-				HorizCurBase.SetResourceReference(TextBlock.ForegroundProperty, CurBaseBrushKey);
-				HorizCurLit.SetResourceReference(TextBlock.ForegroundProperty, CurLitBrushKey);
+				// 空 = 固定色（不随主题）：桌面歌词浮在桌面上，不是应用窗口的一部分。
+				HorizCurLit.Foreground = FixedBrush(LyricBgSense.EnsureReadable(LyricVisualTheme.DlSung, bgLum));
 			}
 			else
 			{
-				var c = (Color)ColorConverter.ConvertFromString(hex);
-				// 底色层是亮色层擦完之前的底，亮度要压低一档，
-				// 擦除动画才看得出「描边变粗」而不是两层完全同色。
-				var b = new System.Windows.Media.SolidColorBrush(c);
-				HorizCurBase.Foreground = new System.Windows.Media.SolidColorBrush(
-					Color.FromRgb(
-						(byte)(c.R * 0.72), (byte)(c.G * 0.72), (byte)(c.B * 0.72)));
-				HorizCurLit.Foreground = b;
+				HorizCurLit.Foreground = FixedBrush(LyricBgSense.EnsureReadable(ColorFromHex(litHex, Colors.White), bgLum));
 			}
+
+			if (string.IsNullOrWhiteSpace(baseHex))
+			{
+				HorizCurBase.Foreground = FixedBrush(LyricBgSense.EnsureReadable(LyricVisualTheme.DlUnsung, bgLum));
+			}
+			else
+			{
+				// 用户指定的「未唱色」照用，只在对比不足时按壁纸亮度提亮/压暗。
+				// 以前这里是「未唱色 × 0.72」，理由是只给一个颜色时需要压暗一档
+				// 好跟已唱色区分开；现在已唱色有了自己的设置项，
+				// 再偷偷压暗一层就变成「我挑的颜色不是那个颜色」。
+				HorizCurBase.Foreground = FixedBrush(LyricBgSense.EnsureReadable(ColorFromHex(baseHex, Colors.White), bgLum));
+			}
+
+			// 翻译行：正在显示的和被顶掉的两层同一支笔。
+			string? trHex = SettingsManager.Instance.LyricTranslateColor;
+			if (string.IsNullOrWhiteSpace(trHex))
+			{
+				// 空 = 固定 65% 白，不随主题（和竖排译文同一组值）。
+				HorizTranslation.Foreground = FixedBrush(LyricBgSense.EnsureReadable(LyricVisualTheme.DlTranslation, bgLum));
+				HorizTranslationOut.Foreground = FixedBrush(LyricBgSense.EnsureReadable(LyricVisualTheme.DlTranslation, bgLum));
+			}
+			else
+			{
+				var trColor = LyricBgSense.EnsureReadable(ColorFromHex(trHex, Colors.White), bgLum);
+				HorizTranslation.Foreground = FixedBrush(trColor);
+				HorizTranslationOut.Foreground = FixedBrush(trColor);
+			}
+
+			LogHelper.LogDiag($"[Diag][歌词窗] ApplyFontColor lit={litHex} base={baseHex} tr={trHex}");
+
+			// 竖排读同一组设置。
+			VerticalView.ApplyColors(litHex, baseHex, trHex);
+
 			// 颜色变了，之前量过的走马灯轨道宽度不按新画刷算了，得重量一次
 			_marqueeTextWidth = 0;
 			_lastFitWidth = -1;
 			FitFontToWidth();
+
+			// 穿透着色只作用于工具/播放按钮（见 ApplyPassthroughTint），歌词文字
+			// 始终保持用户配置色/固定色，这里正常刷完即可，不需要再盖深色。
 		}
 		catch (Exception ex)
 		{
 			LogHelper.LogError(ex, "歌词窗切换颜色失败");
+		}
+	}
+
+	/// <summary>把 #RRGGBB 变成一支画刷。解析不了就退回 <paramref name="fallback"/>，
+	/// 绝不因为一个坏色值就让整句歌词变成透明（那比颜色不对糟得多）。</summary>
+	private static System.Windows.Media.SolidColorBrush BrushFromHex(string hex, Color fallback)
+	{
+		try
+		{
+			return new System.Windows.Media.SolidColorBrush((Color)ColorConverter.ConvertFromString(hex));
+		}
+		catch
+		{
+			return new System.Windows.Media.SolidColorBrush(fallback);
+		}
+	}
+
+	/// <summary>把 #RRGGBB 变成颜色值（对比度自适应要先拿 Color 再算亮度）。
+	/// 解析不了退回 fallback，语义同 <see cref="BrushFromHex"/>。</summary>
+	private static Color ColorFromHex(string hex, Color fallback)
+	{
+		try
+		{
+			return (Color)ColorConverter.ConvertFromString(hex);
+		}
+		catch
+		{
+			return fallback;
 		}
 	}
 
@@ -384,20 +499,18 @@ public partial class LyricWindow : Window
 		Apply(b);
 	}
 
-	private void Apply(LyricBundle? bundle)
+	/// <summary>没歌词时那行状态字（正在加载 / 没找到 / 空闲）。
+	/// 单独抽出来是因为切界面语言后要重刷它，
+	/// 而它原来的赋值写在 Apply 里 —— 切语言不会重新 Apply，
+	/// 于是弹窗上那行提示永远是上一个语言的。</summary>
+	private void RefreshStatusText()
 	{
-		_bundle = bundle;
-		_activeIndex = -1;
-		_path = MusicService.CurrentPath;
-
-		if (bundle == null)
+		try
 		{
-			VerticalView.Load(null, null);
-			StatusText.Visibility = Visibility.Visible;
-			SetTitle(MusicService.CurrentDisplayTitle ?? Loc.Default["lyric_win_title"]);
-			// 没歌词时两个动画源都得停，不然一个 45Hz 的空转计时器
-			// 会在「找不到歌词」的状态下一直跑。
-			StopAnimations();
+			if (_bundle != null)
+			{
+				return;
+			}
 			if (_follow.IsLoading)
 			{
 				StatusText.Text = Loc.Default["lyric_win_loading"];
@@ -410,16 +523,47 @@ public partial class LyricWindow : Window
 			{
 				StatusText.Text = Loc.Default["lyric_win_idle"];
 			}
+		}
+		catch { }
+	}
+
+	/// <summary>界面语言换了：重刷代码里赋过值的字。
+	/// 竖排那句「跟随播放」提示也是代码赋值，得一起刷。</summary>
+	private void OnLanguageChanged(object? sender, EventArgs e)
+	{
+		try
+		{
+			RefreshStatusText();
+			VerticalView.RefreshLocalizedText();
+		}
+		catch { }
+	}
+
+	private void Apply(LyricBundle? bundle)
+	{
+		_bundle = bundle;
+		_activeIndex = -1;
+		_path = MusicService.CurrentPath;
+
+		if (bundle == null)
+		{
+			VerticalView.Load(null, null);
+			StatusText.Visibility = Visibility.Visible;
+			SetTitle(TrackRows.CleanTitleNoise(MusicService.CurrentDisplayTitle) ?? Loc.Default["lyric_win_title"]);
+			// 没歌词时两个动画源都得停，不然一个 45Hz 的空转计时器
+			// 会在「找不到歌词」的状态下一直跑。
+			StopAnimations();
+			RefreshStatusText();
 			UpdatePanelVisibility();
 			return;
 		}
 
-		SetTitle(MusicService.CurrentDisplayTitle ?? Loc.Default["lyric_win_title"]);
+		SetTitle(TrackRows.CleanTitleNoise(MusicService.CurrentDisplayTitle) ?? Loc.Default["lyric_win_title"]);
 		StatusText.Visibility = Visibility.Collapsed;
 
 		VerticalView.Load(bundle, _path);
 		// 横排要立刻画一次，不然切到横排的瞬间是空的，要等下一个 tick。
-		if (!SettingsManager.Instance.LyricWindowVertical)
+		if (!_vertical)
 		{
 			int idx = bundle.IndexAt(LyricClock.PositionMs);
 			_activeIndex = idx;
@@ -429,6 +573,15 @@ public partial class LyricWindow : Window
 		// null，那时会把两个面板都收起来（「没歌词」的布局）；而 Apply 以前
 		// 只管改 StatusText、从不把它们放回来，于是窗口一片空白，
 		// 要用户手动切一次竖/横模式才会出现歌词。
+		ApplyVisualState();
+	}
+
+	/// <summary>可视状态的成对入口：面板显隐 + 动画源对齐，这两步永远一起走。
+	/// 只改面板不换动画源，表现就是「歌词加载完了但它不动」。
+	/// 唯一不走这里的调用方是 ApplyMode：横排切换时量位/定位必须夹在
+	/// 面板显隐和动画源之间，顺序在那边的注释里写明了。</summary>
+	private void ApplyVisualState()
+	{
 		UpdatePanelVisibility();
 		SyncAnimationSources();
 	}
@@ -437,7 +590,7 @@ public partial class LyricWindow : Window
 	private void UpdatePanelVisibility()
 	{
 		bool hasLyric = _bundle != null;
-		bool vertical = SettingsManager.Instance.LyricWindowVertical;
+		bool vertical = _vertical;
 		VerticalView.Visibility = hasLyric && vertical ? Visibility.Visible : Visibility.Collapsed;
 		HorizontalPanel.Visibility = hasLyric && !vertical ? Visibility.Visible : Visibility.Collapsed;
 		StatusText.Visibility = hasLyric ? Visibility.Collapsed : Visibility.Visible;
@@ -459,7 +612,7 @@ public partial class LyricWindow : Window
 	/// </summary>
 	private void SyncAnimationSources()
 	{
-		bool vertical = SettingsManager.Instance.LyricWindowVertical;
+		bool vertical = _vertical;
 		bool hasLyric = _bundle != null;
 
 		if (vertical && hasLyric)
@@ -489,8 +642,11 @@ public partial class LyricWindow : Window
 		// 摆动要在这里补一次。窗口隐藏时 StopAnimations() 会把它掐掉，
 		// 而重新显示时 OnTick 常常发现行号没变就直接 return，
 		// 不会再走一遍 ApplyHorizontal —— 摆动就再也起不来了。
-		// 两套动画互斥：PushUp 不摆（整块上移时再摆会跟位移打架）。
-		if (!vertical && hasLyric && _activeIndex >= 0 && !Anim.NeedsRowShift)
+		//
+		// 两种模板都起摆动：上移那一套现在是「三行各走各的轨迹」，
+		// 摆动只作用在当前句自己身上，不再和整块位移抢同一个变换，
+		// 所以 PushUp 也带得上「浮动顶出」里的浮动。
+		if (!vertical && hasLyric && _activeIndex >= 0)
 		{
 			StartCurBob(Anim);
 		}
@@ -524,15 +680,15 @@ public partial class LyricWindow : Window
 		{
 			int old = _activeIndex;
 			_activeIndex = idx;
-			if (!SettingsManager.Instance.LyricWindowVertical)
+			if (!_vertical)
 			{
 				ApplyHorizontal(idx, old);
 			}
 		}
 		// 擦除每帧都要更新，不然横排只有「整句亮/整句暗」两态，没有卡拉OK效果
-		if (!SettingsManager.Instance.LyricWindowVertical)
+		if (!_vertical)
 		{
-			UpdateHorizontalWipe();
+			EnsureRenderHook();
 		}
 	}
 
@@ -555,13 +711,16 @@ public partial class LyricWindow : Window
 		// 有了这三个数，后面能算出「旧内容搬到了哪一行」，
 		// 也就知道每一行该从哪儿滑到哪儿去。见 AnimatePushUp。
 		bool shift = animate && anim.NeedsRowShift;
-		double oldPrev = 0, oldCur = 0, oldNext = 0;
+		// 只在真要播上移动画时才量：量一次要强制走一遍布局，
+		// 首帧 / 切歌 / Float 那套都不需要它。
+		// 量之前先掐摆动：TransformToAncestor 会把 RenderTransform 算进去，
+		// 带着正在摆的那几像素量出来的「旧当前句位置」是偏的，
+		// 偏多少就会有多少像素的错位被算进退场的起点里。
 		if (shift)
 		{
-			oldPrev = TopInPanel(HorizPrev);
-			oldCur = TopInPanel(HorizWipeHost);
-			oldNext = TopInPanel(HorizNext);
+			StopCurBob();
 		}
+		double[] oldTops = shift ? MeasureRowTops() : Array.Empty<double>();
 
 		if (idx < 0 || idx >= _bundle.Count)
 		{
@@ -588,16 +747,24 @@ public partial class LyricWindow : Window
 		HorizNext.Text = idx + 1 < _bundle.Count ? _bundle.Lines[idx + 1].Text : "";
 		// 换行句子的高度要跟着变，否则擦除矩形还是上一句的高度，
 		// 亮色层会从上半截突然整个消失，看起来像「字突然没了」。
-		HorizCurClip.Rect = new Rect(0, 0, 0, HorizCurLit.ActualHeight);
+		//
+		// 但这一句必须放在 FitFontToWidth 之后：擦除矩形的高度取的是
+		// HorizCurLit.ActualHeight，而这个高度是跟着字号走的。
+		// 先量后改字号的话，量到的是「上一句的字号」下的高度，
+		// 新字更大时矩形就盖不满新字，亮色层被从下半截裁掉；
+		// 首帧那次 ActualHeight 是 0，矩形高度 0，亮色层整个不见了——
+		// 只剩底层暗色字，看起来就像「动画结束后不显示字」。
+		//
 		// 字号不写死在 XAML 里，交给 FitFontToWidth 按这一句的实际长度算。
 		FitFontToWidth();
+		HorizCurClip.Rect = new Rect(0, 0, 0, HorizCurLit.ActualHeight);
 		// 换句就把走马灯拨回句首，不管这一句是不是长句：
 		// 短句虽然不会漂，但残留的位移会让它在切进来的瞬间从半截开始显示。
 		ResetPan();
 		// 已唱过的上一句压暗、还没唱的下一句保持稍亮，
 		// 于是「已经唱到哪」一眼能看出来，而不是三行灰得一样。
-		HorizPrev.Opacity = PrevPlayed;
-		HorizNext.Opacity = NextPending;
+		HorizPrev.Opacity = LyricVisualTheme.PrevPlayed;
+		HorizNext.Opacity = LyricVisualTheme.NextPending;
 
 		if (showTr && !string.IsNullOrWhiteSpace(cur.Translation))
 		{
@@ -610,11 +777,11 @@ public partial class LyricWindow : Window
 
 		if (shift)
 		{
-			// 互斥：PushUp 那套是「三行整块挪」，Float 那套是「当前句原地动」。
+			// 互斥：PushUp 那套是「三行各走各的轨迹」，Float 那套是「当前句原地动」。
 			// 两套同时跑会互相拉扯，所以这里只跑一套，另一套先落位。
 			ResetCurSelect();
 			StopCurBob();
-			AnimatePushUp(oldPrev, oldCur, oldNext, anim);
+			AnimatePushUp(anim, oldTops);
 		}
 		else if (animate)
 		{
@@ -839,7 +1006,7 @@ public partial class LyricWindow : Window
 
 	private double TopInPanel(FrameworkElement el) => TopInPanel(el, HorizontalPanel);
 
-	/// <summary>三行的竖向位移全部落位。</summary>
+/// <summary>三行的竖向位移与缩放全部落位。</summary>
 	private void ResetRowShifts()
 	{
 		foreach (TranslateTransform? t in new[] { _prevShift, _curShift, _nextShift })
@@ -855,22 +1022,113 @@ public partial class LyricWindow : Window
 			}
 			catch { }
 		}
+		ResetRowScales();
 	}
 
-	/// <summary>「下面歌词顶上去，下一句也冒出来」：三行整体上移一格。
+	/// <summary>一行的画刷颜色过渡（唱完那句由亮转暗、新句子由暗转亮）。
 	///
-	/// 关键在于别去量「同一个格子换句前后差多少」——三行的行高是
-	/// Auto / * / Auto，差值恒为 0，量了也是白量（这是之前那版动画
-	/// 「看着没反应」的原因）。要量的是「内容从哪个格子搬到了哪个格子」：
+	/// 为什么要单独做颜色：透明度只是「整体变淡」，前后两句即使透明度一样，
+	/// 观感上也分不出「刚唱完」和「马上要唱」。真正的区别在颜色：
+	/// 唱过的句子应该是冷的、暗的。所以退场那一下要真的把颜色走过去。
 	///
-	///   旧内容          →  换句后所在格子      →  位移 = 新位置 - 旧位置
-	///   -------------------------------
-	///   当前句（中间）  →  上一句（顶格）      →  newPrev - oldCur
-	///   下一句（底格）  →  当前句（中间）      →  newCur  - oldNext
-	///   （新出现的）    →  下一句（底格）      →  从下面一格外冒出来
+	/// 坑：主题给的画刷是冻结共享的，不能改它的 Color（改一个全局变色）。
+	/// 所以这里拿终点颜色新建一支 SolidColorBrush 当动画对象，
+	/// 并先把它赋给元素当基值 —— FillBehavior.Stop 结束后回落的正好是终点色。
+	private void AnimateRowColor(UIElement el, Brush to, Brush from,
+		Duration dur, System.Windows.Media.Animation.IEasingFunction ease,
+		TimeSpan? begin = null)
+	{
+		try
+		{
+			// 穿透着色只染按钮、不染歌词文字（用户要求），文字动画无需让位。
+			if (el is not TextBlock tb || to is not SolidColorBrush dest)
+			{
+				return;
+			}
+			if (from is not SolidColorBrush src || src.Color == dest.Color)
+			{
+				return;
+			}
+			var brush = new SolidColorBrush(dest.Color);
+			tb.BeginAnimation(TextBlock.ForegroundProperty, null);
+			tb.Foreground = brush;
+			var anim = new System.Windows.Media.Animation.ColorAnimation(src.Color, dest.Color, dur)
+			{
+				EasingFunction = ease,
+				FillBehavior = System.Windows.Media.Animation.FillBehavior.Stop
+			};
+			if (begin.HasValue)
+			{
+				anim.BeginTime = begin.Value;
+			}
+			brush.BeginAnimation(SolidColorBrush.ColorProperty, anim);
+		}
+		catch { }
+	}
+
+/// <summary>三行的缩放落回 1（位移之外的另一半状态）。
+	/// 当前句那份叫 ResetCurSelect，两边都归 1 才不会两套动画互相拉扯。</summary>
+	private void ResetRowScales()
+	{
+		ResetOneScale(_prevScale);
+		ResetOneScale(_nextScale);
+		ResetOneScale(_curScale);
+	}
+
+	private static void ResetOneScale(ScaleTransform? s)
+	{
+		if (s == null)
+		{
+			return;
+		}
+		try
+		{
+			s.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+			s.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+			s.ScaleX = 1.0;
+			s.ScaleY = 1.0;
+		}
+		catch { }
+	}
+
+	/// <summary>量三行各自在面板里的纵向位置（相对 <see cref="HorizontalPanel"/>），
+	/// 下标 0/1/2 = 上一句 / 当前句 / 下一句。量不到的那一行给 NaN。
 	///
-	/// 三条都是「上面那句往下长出来一条缝」的效果，叠起来就是整块上移。</summary>
-	private void AnimatePushUp(double oldPrev, double oldCur, double oldNext, LyricAnimTemplate anim)
+	/// 量之前必须先把位移和缩放抹平：TransformToAncestor 会把 RenderTransform
+	/// 一起算进去，带着上一轮动画残量量出来的 top = 布局位置 + 残量，
+	/// 拿它当起点就等于每换一句多叠一层，最后整块被推出窗口。</summary>
+	private double[] MeasureRowTops()
+	{
+		ResetRowShifts();
+		try
+		{
+			HorizontalPanel.UpdateLayout();
+		}
+		catch { }
+		return new[]
+		{
+			TopInPanel(HorizPrev),
+			TopInPanel(HorizWipeHost),
+			TopInPanel(HorizNext)
+		};
+	}
+
+	private static double Pick(double[] arr, int i)
+	{
+		return i >= 0 && i < arr.Length ? arr[i] : double.NaN;
+	}
+
+	/// <summary>切句时的三行错位动画：每一行各自走到自己该在的格子里。
+	///
+	/// 三行的来路和去处都是不一样的：
+	/// - 上一句这一格：装的是刚才在唱的那句 → 从中间退到上面，边走边缩小、变淡；
+	/// - 当前句这一格：装的是刚才的下一句 → 从下面升进中间，落位时过渡放大；
+	/// - 下一句这一格：装的是刚冒出来的那句 → 从下面冒出来，晚一点起步。
+	///
+	/// 以前这里是「三行用同一个位移量上移」，看上去就是整块歌词一起挪，
+	/// 既没有「下一句升进中间」的重点，也没有前一句退场的交代 ——
+	/// 用户要的是每行各有各的轨迹，所以这里改成逐行算起点。
+	private void AnimatePushUp(LyricAnimTemplate anim, double[] oldTops)
 	{
 		if (_closing || _prevShift == null || _curShift == null || _nextShift == null)
 		{
@@ -884,41 +1142,83 @@ public partial class LyricWindow : Window
 		}
 		try
 		{
-			// 文本刚换过，得强制走一次布局才量得到新位置。
-			HorizontalPanel.UpdateLayout();
-			double newPrev = TopInPanel(HorizPrev);
-			double newCur = TopInPanel(HorizWipeHost);
-			double newNext = TopInPanel(HorizNext);
-			// 量不到（三行里有 Height=0）就别硬滑，落位更安全。
-			if (double.IsNaN(newPrev) || double.IsNaN(newCur) || double.IsNaN(newNext))
-			{
-				ResetRowShifts();
-				return;
-			}
+			// 文本、字号都已经换成新的了，重新量一次得到「各自的新格子」。
+			double[] newTops = MeasureRowTops();
+			double prevTop = Pick(newTops, 0);
+			double curTop = Pick(newTops, 1);
+			double nextTop = Pick(newTops, 2);
+			double oldPrev = Pick(oldTops, 0);
+			double oldCur = Pick(oldTops, 1);
+			double oldNext = Pick(oldTops, 2);
 
-			var dur = new Duration(TimeSpan.FromMilliseconds(anim.PushUpMs));
-			var ease = new System.Windows.Media.Animation.CubicEase
+			var move = new Duration(TimeSpan.FromMilliseconds(anim.PushUpMs));
+			var moveEase = new System.Windows.Media.Animation.CubicEase
 			{
 				EasingMode = System.Windows.Media.Animation.EasingMode.EaseOut
 			};
-
-			// 旧中间 → 新顶格
-			SlideRowY(_prevShift, double.IsNaN(oldCur) ? newCur : oldCur, newPrev, dur, ease);
-			// 旧底格 → 新中间
-			SlideRowY(_curShift, double.IsNaN(oldNext) ? newNext : oldNext, newCur, dur, ease);
-// 新底格：从下面一格外冒出来。间距取中间格和底格的距离，
-			// 拿不到就退 40px。
-			//
-			// 方向是「底格减去中格」：行定义自上而下是 prev(0)/cur(1)/next(2)，
-			// 所以 newNext 在 newCur 下面，这个差值是正的行高。
-			// 写成 newCur - newNext 会恒为负，被下面的 <=1 判据吃掉，
-			// 于是自定义行距永远走不到、每次都退化成 40px。
-			double pitch = newNext - newCur;
-			if (double.IsNaN(pitch) || pitch <= 1)
+			var sizeEase = new System.Windows.Media.Animation.CubicEase
 			{
-				pitch = 40;
-			}
-			SlideRowY(_nextShift, newNext + pitch, newNext, dur, ease);
+				EasingMode = System.Windows.Media.Animation.EasingMode.EaseInOut
+			};
+
+			// ① 唱完的那句退到「上一句」那一格：往上走，同时缩小、淡成已唱过。
+			//    颜色是这一步的重点：它刚从中间那格过来，中间那格是「正在唱」
+			//    的亮色。不给它一段由亮转暗的过程，它就是「亮着飞到上面、
+			//    然后啪一下变灰」，看着像卡了一帧。透明度之外还要走一遍
+			//    画刷颜色，「唱完了」这件事才是连续的。
+			SlideRowY(_prevShift, oldCur, prevTop, move, moveEase);
+			AnimateRowScale(_prevScale, anim.PrevShrinkFrom, 1.0, move, sizeEase);
+			FadeRow(HorizPrev, LyricVisualTheme.PrevPlayed, LyricVisualTheme.PrevArriveOpacity, move, moveEase);
+			AnimateRowColor(HorizPrev, Dimmed(CurSungBrush()),
+				CurSungBrush(), move, moveEase);
+
+			// ② 下一句升进中间：起点是它刚才待的下一格，落到位时过渡放大。
+			//    放大用的是 SelectMs / SelectFromScale —— 那两个参数本来就是
+			//    「切进当前句的过渡」，只是以前 PushUp 把它俩写成 0，等于关掉了。
+			//    亮色层（唱过的那一段）由暗转亮：暗色底衬（DlUnsung 定值白）
+			//    本来就是亮的，不用再动，动它只会让「未唱/已唱」的对比变弱。
+			var select = anim.SelectMs > 0
+				? new Duration(TimeSpan.FromMilliseconds(anim.SelectMs))
+				: move;
+			double growFrom = Math.Clamp(anim.SelectFromScale, 0.5, 1.5);
+			SlideRowY(_curShift, oldNext, curTop, move, moveEase);
+			AnimateRowScale(_curScale, growFrom, 1.0, select, sizeEase);
+			FadeRow(HorizWipeHost, 1.0, LyricVisualTheme.CurArriveOpacity, select, moveEase);
+			AnimateRowColor(HorizCurLit, CurSungBrush(),
+				CurUnsungBrush(), select, moveEase);
+
+			// ③ 再下一句从下面冒出来。晚起步、走得快，才有「冒头」而不是「又挪了一行」。
+			//
+			// 「冒多远」必须按相邻两格（②和③之间）的真实间距算，不能取
+			// max(①到②, ②到③)。取 max 的话，弹窗高的时候 ①→② 那一段
+			// （上一句高度 + 整块当前句高度）会远大于 ②→③，
+			// 于是这一行从「面板下方大半个窗口之外」起步，
+			// 一路横扫过整个面板才停到 ③ 的位置 ——
+			// 横穿的过程中它和正在往上移的①（上一句）叠在同一段垂直区间里，
+			// 两行字叠在一起读不出来，这就是「后一句冒出来和移上去的那句混一起」。
+			//
+			// 现在只按 ②→③ 的间距起步：行程被限制在一行之内，
+			// 物理上就撞不到 ①。再加上透明度「最后 45% 才起来」，
+			// 就算布局量歪了、行程偏大，露脸时也已经基本到位。
+			double step = NextRiseStep(curTop, nextTop);
+			var riseDelay = TimeSpan.FromMilliseconds(Math.Min(move.TimeSpan.TotalMilliseconds * 0.3, 140));
+			var rise = new Duration(TimeSpan.FromMilliseconds(
+				Math.Max(120, move.TimeSpan.TotalMilliseconds * 0.72)));
+			// 淡入和缩放都推到行程后半段：前半程它在别的行附近飞，
+			// 露脸就会和它们叠在一起。
+			var appearAt = riseDelay + TimeSpan.FromMilliseconds(rise.TimeSpan.TotalMilliseconds * 0.45);
+			var appearDur = new Duration(TimeSpan.FromMilliseconds(
+				Math.Max(60, rise.TimeSpan.TotalMilliseconds * 0.55)));
+			SlideRowY(_nextShift, nextTop + step, nextTop, rise, moveEase, riseDelay);
+			AnimateRowScale(_nextScale, LyricVisualTheme.NextRiseScale, 1.0, appearDur, sizeEase, appearAt);
+			FadeRowHidden(HorizNext, LyricVisualTheme.NextPending, appearDur, moveEase, appearAt);
+			AnimateRowColor(HorizNext, Dimmed(CurUnsungBrush(), 0.82),
+				Dimmed(CurUnsungBrush()), appearDur, moveEase, appearAt);
+
+			// ④ 顶出：当前句照旧轻轻上下浮（用户要的「加上浮动顶出」就是这一项）。
+			//    现在浮动挂在当前句自己身上，三行又是各走各的，
+			//    所以它和上面的位移不再互相打架，PushUp 也能开着。
+			StartCurBob(anim);
 		}
 		catch (Exception ex)
 		{
@@ -927,10 +1227,23 @@ public partial class LyricWindow : Window
 		}
 	}
 
+	/// <summary>新冒出来的那句要冒多远：只取「当前句 → 下一句」这一段的间距。
+	///
+	/// 不能拿相邻两段里较大的那个（见调用处的说明）：那样会让这一行
+	/// 从面板下方很远的地方横扫上来，途中和正在上移的上一句叠在一起。
+	/// 量不到就退回一个经验值。</summary>
+	private static double NextRiseStep(double curTop, double nextTop)
+	{
+		double step = nextTop - curTop;
+		return double.IsNaN(step) || step <= 1 ? LyricVisualTheme.FallbackRowStep : step;
+	}
+
 	/// <summary>一行从 oldTop 滑到 newTop。位移太短就直接落位，
-	/// 不然一个 0.4px 的「滑一下」会变成一次肉眼可见的抖动。</summary>
+	/// 不然一个 0.4px 的「滑一下」会变成一次肉眼可见的抖动。
+	/// <paramref name="begin"/> 非空时这一行晚一点起步（用来做错位）。</summary>
 	private static void SlideRowY(TranslateTransform t, double oldTop, double newTop,
-		Duration dur, System.Windows.Media.Animation.IEasingFunction ease)
+		Duration dur, System.Windows.Media.Animation.IEasingFunction ease,
+		TimeSpan? begin = null)
 	{
 		t.BeginAnimation(TranslateTransform.YProperty, null);
 		if (double.IsNaN(oldTop) || double.IsNaN(newTop) || Math.Abs(oldTop - newTop) < 1.0)
@@ -938,15 +1251,123 @@ public partial class LyricWindow : Window
 			t.Y = 0;
 			return;
 		}
-		// 基值 = 终点，From = 起点。跟 AnimateXTo 同一个理由：
-		// FillBehavior.Stop 结束后回落到基值，基值是终点才停得对。
-		t.Y = newTop;
-		t.BeginAnimation(TranslateTransform.YProperty,
-			new System.Windows.Media.Animation.DoubleAnimation(oldTop - newTop, 0.0, dur)
+		// 注意基值只能是 0，不能写成 newTop。
+		//
+		// TranslateTransform.Y 是「相对自己布局位置的偏移」，行归位时
+		// 正确的偏移就是 0。这里曾经把基值写成 newTop（以为「基值=终点」），
+		// 但那条规矩只适用于 Opacity 这类绝对值属性；偏移量这里终点就是 0。
+		//
+		// 后果是动画跑完的瞬间，每一行都还带着自己那格的高度：当前行被
+		// 往下推两百多像素、下一句被推将近一千像素，而整个面板才 170 高，
+		// 于是「正在唱的」和「下一句」直接被推出窗口外看不见，只有动画
+		// 进行中那一下能看见——因为动画期间 Y 是动画值，落在可见范围内。
+		t.Y = 0;
+		var anim = new System.Windows.Media.Animation.DoubleAnimation(oldTop - newTop, 0.0, dur)
+		{
+			EasingFunction = ease,
+			FillBehavior = System.Windows.Media.Animation.FillBehavior.Stop
+		};
+		if (begin.HasValue)
+		{
+			anim.BeginTime = begin.Value;
+		}
+		t.BeginAnimation(TranslateTransform.YProperty, anim);
+	}
+
+	/// <summary>一行的缩放过渡。<paramref name="to"/> 一律是 1（落位状态），
+	/// 基值也设成 1，这样 FillBehavior.Stop 结束时回落的正好是落位值。
+	/// 两个轴各挂一份动画而不是共用同一个实例：一个 Animation 实例
+	/// 同时挂到两个属性上，后挂的那次会顶掉前一次的时钟。</summary>
+	private static void AnimateRowScale(ScaleTransform? s, double from, double to,
+		Duration dur, System.Windows.Media.Animation.IEasingFunction ease,
+		TimeSpan? begin = null)
+	{
+		if (s == null)
+		{
+			return;
+		}
+		try
+		{
+			s.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+			s.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+			s.ScaleX = to;
+			s.ScaleY = to;
+			if (double.IsNaN(from) || Math.Abs(to - from) < 0.001)
+			{
+				return;
+			}
+			foreach (DependencyProperty p in new[]
+				{ ScaleTransform.ScaleXProperty, ScaleTransform.ScaleYProperty })
+			{
+				var anim = new System.Windows.Media.Animation.DoubleAnimation(from, to, dur)
+				{
+					EasingFunction = ease,
+					FillBehavior = System.Windows.Media.Animation.FillBehavior.Stop
+				};
+				if (begin.HasValue)
+				{
+					anim.BeginTime = begin.Value;
+				}
+				s.BeginAnimation(p, anim);
+			}
+		}
+		catch { }
+	}
+
+	/// <summary>一行的透明度过渡。和位移/缩放同理：基值设成终点 <paramref name="to"/>。</summary>
+	private static void FadeRow(UIElement el, double to, double from, Duration dur,
+		System.Windows.Media.Animation.IEasingFunction ease, TimeSpan? begin = null)
+	{
+		try
+		{
+			el.BeginAnimation(UIElement.OpacityProperty, null);
+			el.Opacity = to;
+			if (double.IsNaN(from) || Math.Abs(to - from) < 0.005)
+			{
+				return;
+			}
+			var anim = new System.Windows.Media.Animation.DoubleAnimation(from, to, dur)
 			{
 				EasingFunction = ease,
 				FillBehavior = System.Windows.Media.Animation.FillBehavior.Stop
-			});
+			};
+			if (begin.HasValue)
+			{
+				anim.BeginTime = begin.Value;
+			}
+			el.BeginAnimation(UIElement.OpacityProperty, anim);
+		}
+		catch { }
+	}
+
+	/// <summary>同 <see cref="FadeRow"/>，但延迟（BeginTime）期间保持隐藏。
+	///
+	/// FadeRow 的规矩是「基值 = 终点」，这在没有延迟时是对的；可冒头动画里
+	/// 下一句的淡入被推到 appearAt 才起步，那段延迟里基值 0.62 会直接显示——
+	/// 而这正是新当前句从旧下一句槽位升上来的时段，两行字叠在同一格里
+	/// 同时露脸，用户看到的就是「重合出现两次」。
+	///
+	/// 这里反过来：基值先置 0，动画 0→to 带 BeginTime 走，延迟期属性取基值
+	/// （0，不可见）；结束时 FillBehavior.Stop 回落的还是 0，所以要在
+	/// Completed 里把基值补成 to —— 动画被中途打断时旧时钟被摘掉、
+	/// Completed 不会触发，基值留 0，由下一次换句的赋值接管，不会残留。</summary>
+	private static void FadeRowHidden(UIElement el, double to, Duration dur,
+		System.Windows.Media.Animation.IEasingFunction ease, TimeSpan begin)
+	{
+		try
+		{
+			el.BeginAnimation(UIElement.OpacityProperty, null);
+			el.Opacity = 0.0;
+			var anim = new System.Windows.Media.Animation.DoubleAnimation(0.0, to, dur)
+			{
+				EasingFunction = ease,
+				FillBehavior = System.Windows.Media.Animation.FillBehavior.Stop,
+				BeginTime = begin
+			};
+			anim.Completed += (_, _) => { el.Opacity = to; };
+			el.BeginAnimation(UIElement.OpacityProperty, anim);
+		}
+		catch { }
 	}
 
 	/// <summary>设置翻译文字，并按需播「从左往右把上一句顶掉」的推挤动画。
@@ -1077,31 +1498,91 @@ public partial class LyricWindow : Window
 		}
 	}
 
-	/// <summary>当前句的颜色过渡：从「下一句」那种暗色渐变到正常色。
-	/// 拿不到 SolidColorBrush（主题刷可能是渐变或画刷）就整段跳过，
-	/// 只保留位移，不影响可用性。
+	// 当前句两层的回退色（空配置时）：LyricVisualTheme.Dl* 定值，不随主题。
+	// 以前是 {DynamicResource TextTertiary/TextPrimary}：主题一切当前句跟着变色，
+	// 桌面歌词窗的观感被应用主题牵着走。切句动画结束后也按这两个定值
+	// 把画刷装回去（不再装资源引用），穿透态的恢复值同样取自这里，
+	// 三处语义全局一致。
+
+	/// <summary>「唱过的那一段」当前应该是什么颜色。
 	///
-	/// 动画期间是把 Foreground 整个换成一个自建画刷的，这会顶掉 XAML 里的
-	/// {DynamicResource}——不还原的话，之后换主题时当前句的颜色就再也不跟着变了
-	/// （它已经变成一个写死的普通画刷）。所以动画结束后必须把资源引用装回去。
-	/// 装回去的键要跟 XAML 里写的一致：底色层 TextTertiaryBrush、亮色层 TextPrimaryBrush。</summary>
-	private const string CurBaseBrushKey = "TextTertiaryBrush";
-	private const string CurLitBrushKey = "TextPrimaryBrush";
+	/// PushUp 的三条颜色过渡以前是写死主题刷的回退，
+	/// 也就是说用户自定义了歌词颜色之后，切句动画还是按主题色跑：
+	/// 动画中途会把行刷成主题亮/暗色再飞过去，闪一下才落回自定义色。
+	/// 这里统一读设置：有自定义色就用自定义色，空了回固定色。</summary>
+	private Brush CurSungBrush()
+	{
+		string? hex = SettingsManager.Instance.LyricSungColor;
+		return string.IsNullOrWhiteSpace(hex)
+			? FixedBrush(LyricVisualTheme.DlSung)
+			: BrushFromHex(hex, LyricVisualTheme.DlSung);
+	}
+
+	/// <summary>「还没唱到的那一段」当前应该是什么颜色。见 <see cref="CurSungBrush"/>。</summary>
+	private Brush CurUnsungBrush()
+	{
+		string? hex = SettingsManager.Instance.LyricFontColor;
+		return string.IsNullOrWhiteSpace(hex)
+			? FixedBrush(LyricVisualTheme.DlUnsung)
+			: BrushFromHex(hex, LyricVisualTheme.DlUnsung);
+	}
+
+	/// <summary>定值色的画刷。每处现建一支：切句动画要改画刷的 Color，
+	/// 冻结的共享刷会被动画撞坏。</summary>
+	private static SolidColorBrush FixedBrush(Color c)
+	{
+		return new SolidColorBrush(c);
+	}
+
+	/// <summary>把某个颜色压暗一档，给上一句/下一句用。
+	///
+	/// 注意压暗的是「派生出来给旁边两行看的那个颜色」，
+	/// 不是用户存的那个值：设置里选什么色就是什么色，
+	/// 但三行必须再有明暗层级，不然刚唱完的上一句和正在唱的当前句一样亮，
+	/// 不知道唱到哪了。桌面歌词永远在暗底语境里浮着，固定往上加亮度（>1）；
+	/// 以前按 ThemeManager.IsDark 换方向，主题一切上一句/下一句
+	/// 的颜色跟着跳——那正是「桌面歌词随主题」的漏网之鱼。
+	///
+	/// 亮度有下限：用户挑了深色（或解析出的色很深）时，乘出来的派生色
+	/// 仍然接近黑，暗壁纸上一句/下一句就糊成一团看不清——这正是
+	/// 「歌词文字跟着变黑」的一条来路。所以派生色的感知亮度一律抬到
+	/// 不低于 0.45（向白色混合），保证它永远不会黑掉。</summary>
+	private static SolidColorBrush Dimmed(Brush b, double factor = 0.72)
+	{
+		Color c = b is SolidColorBrush sb ? sb.Color : Colors.White;
+		double k = 1 / factor;
+		byte r = (byte)Math.Clamp(c.R * k, 0, 255);
+		byte g = (byte)Math.Clamp(c.G * k, 0, 255);
+		byte bl = (byte)Math.Clamp(c.B * k, 0, 255);
+		// 感知亮度（Rec.601）。低于下限就向白色混合，把亮度抬回下限：
+		// 混合比例 t 由「目标亮度 = 亮度 + t×(1−亮度)」反解。
+		const double minLum = 0.45;
+		double lum = (0.299 * r + 0.587 * g + 0.114 * bl) / 255.0;
+		if (lum < minLum && lum < 1.0)
+		{
+			double t = (minLum - lum) / (1.0 - lum);
+			r = (byte)Math.Clamp(r + (255 - r) * t, 0, 255);
+			g = (byte)Math.Clamp(g + (255 - g) * t, 0, 255);
+			bl = (byte)Math.Clamp(bl + (255 - bl) * t, 0, 255);
+		}
+		return new SolidColorBrush(Color.FromRgb(r, g, bl));
+	}
 
 	private void AnimateCurrentLineColor(Duration dur,
 		System.Windows.Media.Animation.IEasingFunction ease)
 	{
-		AnimateBrush(HorizCurBase, CurBaseBrushKey, dur, ease);
-		AnimateBrush(HorizCurLit, CurLitBrushKey, dur, ease);
+		AnimateBrush(HorizCurBase, LyricVisualTheme.DlUnsung, dur, ease);
+		AnimateBrush(HorizCurLit, LyricVisualTheme.DlSung, dur, ease);
 	}
 
-	private void AnimateBrush(TextBlock tb, string resourceKey, Duration dur,
+	private void AnimateBrush(TextBlock tb, Color restoreColor, Duration dur,
 		System.Windows.Media.Animation.IEasingFunction ease)
 	{
 		try
 		{
+			// 穿透着色只染按钮、不染歌词文字（用户要求），此动画无需让位。
 			// 用户指定了当前行颜色就不做颜色过渡：这条动画的终点是
-			// 「主题正常色」，跑完还会把画刷还原成主题资源引用，
+			// 「正常色」，跑完还会把画刷还原成官方画刷，
 			// 正好把刚设进去的自定义色冲掉。留给尺寸过渡和摆动。
 			if (!string.IsNullOrWhiteSpace(SettingsManager.Instance.LyricFontColor))
 			{
@@ -1109,7 +1590,7 @@ public partial class LyricWindow : Window
 			}
 			if (tb.Foreground is not System.Windows.Media.SolidColorBrush sb
 				|| sb.IsFrozen) return;
-			// 正常色就是它自己当前的颜色（XAML 里是 TextPrimary/TextTertiary）。
+			// 正常色就是它自己当前的颜色（空配置时是 Dl* 定值刷）。
 			var to = sb.Color;
 			// 起点：压暗 + 稍微去饱和，模拟「还没唱到」的样子。
 			Color from = System.Windows.Media.Color.FromArgb(
@@ -1127,9 +1608,10 @@ public partial class LyricWindow : Window
 					EasingFunction = ease,
 					FillBehavior = System.Windows.Media.Animation.FillBehavior.Stop
 				});
-			// 过渡结束就还原成资源引用（换主题还能跟上），
-			// 延时比动画本身长一点，避免动画还没停就把画刷换掉、闪一下。
-			RestoreBrushLater(tb, resourceKey, (int)Anim.SelectMs + 60);
+			// 过渡结束就还原成官方定值刷（桌面歌词不随主题，也就无需
+			// 装回 {DynamicResource}），延时比动画本身长一点，
+			// 避免动画还没停就把画刷换掉、闪一下。
+			RestoreBrushLater(tb, restoreColor, (int)Anim.SelectMs + 60);
 		}
 		catch
 		{
@@ -1137,12 +1619,12 @@ public partial class LyricWindow : Window
 		}
 	}
 
-	/// <summary>动画结束后把 {DynamicResource} 装回 Foreground。
+	/// <summary>动画结束后把官方定值刷装回 Foreground。
 	/// 延后一点再装：FillBehavior.Stop 的回滚发生在动画最后一帧，
 	/// 紧接着就换画刷会和那一帧打架，偶尔闪一下。
-	/// 参数用 TextBlock：SetResourceReference 在 FrameworkElement 上（可用），
-	/// 但 ForegroundProperty 只定义在 TextBlock 上，两边都得满足。</summary>
-	private void RestoreBrushLater(TextBlock el, string resourceKey, int delayMs)
+	/// 桌面歌词的「官方色」是 LyricVisualTheme.Dl* 定值，不是主题资源：
+	/// 装资源引用的话主题一切颜色就跟着变了。</summary>
+	private void RestoreBrushLater(TextBlock el, Color restoreColor, int delayMs)
 	{
 		try
 		{
@@ -1155,8 +1637,10 @@ public partial class LyricWindow : Window
 				((DispatcherTimer)s!).Stop();
 				try
 				{
+					// 该定时器只服务歌词文字行的还原；穿透着色现在只染按钮，
+					// 文字行随时可以正常装回官方色。
 					el.BeginAnimation(TextBlock.ForegroundProperty, null);
-					el.SetResourceReference(TextBlock.ForegroundProperty, resourceKey);
+					el.Foreground = FixedBrush(restoreColor);
 				}
 				catch { }
 			};
@@ -1169,12 +1653,60 @@ public partial class LyricWindow : Window
 	///
 	/// 之前字号写死 21，于是长句直接铺出窗口边缘被切掉半截。
 	/// 思路是二分一个「能整句放进可用宽度」的最大字号，落在
-	/// [CurFontMin, CurFontMax]。测宽度用 FormattedText 而不是
+	/// [LyricVisualTheme.CurFontMin, LyricVisualTheme.CurFontMax]。测宽度用 FormattedText 而不是
 	/// TextBlock.Measure：后者还要跑一遍换行布局，一行超长句能拖到
 	/// 十几毫秒，而这里是每次切行都调。
 	/// </summary>
+	/// <summary>字号随弹窗高度缩放的系数。
+	///
+	/// 原来字号只在 [12, 21] 里按「句长」挑，跟弹窗大小无关：
+	/// 弹窗拉到 300px 高，字还是那么小，中间大片空白；缩到 80px 高，
+	/// 字反而挤成三行。于是改用高度换算出一个系数，
+	/// 基准高度 LyricVisualTheme.BaseWindowHeight 时正好是 1（行为跟以前一样），
+	/// 整体再乘进字号上下限。
+	///
+	/// 夹在 LyricVisualTheme.FontScaleMin~LyricVisualTheme.FontScaleMax：太矮时字会小到读不清，
+	/// 太高时三行加翻译会撑破窗口高度开始互顶。</summary>
+	private double UpdateScaledFontSizes()
+	{
+		double h = ActualHeight;
+		double scale = h > 1 ? h / LyricVisualTheme.BaseWindowHeight : 1.0;
+		if (scale < LyricVisualTheme.FontScaleMin) scale = LyricVisualTheme.FontScaleMin;
+		if (scale > LyricVisualTheme.FontScaleMax) scale = LyricVisualTheme.FontScaleMax;
+		return scale;
+	}
+
+	/// <summary>把缩放系数应用到当前句之外的文字。
+	///
+	/// 这些字号原本是写死在 XAML 里的 12/13（上一句、下一句、翻译），
+	/// 当前句走 FitFontToWidth 会跟着缩放、它们不跟，结果就是
+	/// 弹窗一大「当前句很大、上下句还是小字」，层级全乱了。
+	/// 这里让它们用同一个系数。</summary>
+	private void ApplySecondaryFontSizes(double scale)
+	{
+		try
+		{
+			HorizPrev.FontSize = 12 * scale;
+			HorizNext.FontSize = 12 * scale;
+			HorizTranslation.FontSize = 13 * scale;
+			HorizTranslationOut.FontSize = 13 * scale;
+			// MaxHeight / MinHeight 也得跟着放大，否则字变大了、
+			// 容器还按老高度裁，字会被截掉下半截。
+			HorizNext.MaxHeight = 32 * scale;
+			TransHost.MinHeight = 18 * scale;
+			HorizTranslation.MaxHeight = 20 * scale;
+		}
+		catch { }
+	}
+
 	private void FitFontToWidth()
 	{
+		// 字号随弹窗大小缩放：先算出系数，再让 FitFontToWidth 和
+		// 上一句/下一句/翻译共用它。这样拉大弹窗字跟着变大，
+		// 缩小弹窗字跟着变小，而不是永远 12~21 不动。
+		double scale = UpdateScaledFontSizes();
+		ApplySecondaryFontSizes(scale);
+
 		if (string.IsNullOrEmpty(HorizCurBase.Text))
 		{
 			return;
@@ -1182,9 +1714,7 @@ public partial class LyricWindow : Window
 		double avail = HorizWipeHost.ActualWidth;
 		if (avail <= 1)
 		{
-			// 布局还没量过（刚切到横排/窗口刚显示）。先给个中间值，
-			// SizeChanged 和下一帧会用真实宽度重算。
-			HorizCurBase.FontSize = (CurFontMin + CurFontMax) / 2;
+			HorizCurBase.FontSize = ((LyricVisualTheme.CurFontMin + LyricVisualTheme.CurFontMax) / 2) * scale;
 			HorizCurLit.FontSize = HorizCurBase.FontSize;
 			return;
 		}
@@ -1198,27 +1728,35 @@ public partial class LyricWindow : Window
 			FontStretches.Normal);
 		Brush brush = HorizCurBase.Foreground;
 
-		HorizCurBase.FontSize = CurFontMax;
-		while (HorizCurBase.FontSize > CurFontMin)
-		{
-			if (Measure(HorizCurBase.Text, typeface, HorizCurBase.FontSize, brush) <= budget)
-			{
-				break;
-			}
-			// 收一档再来。每档 1px 足够细腻。
-			HorizCurBase.FontSize -= 1;
-		}
-		// 两层字号必须一致，否则擦除的亮色层和底层文字对不齐
-		HorizCurLit.FontSize = HorizCurBase.FontSize;
+		double maxSize = LyricVisualTheme.CurFontMax * scale;
+		double minSize = LyricVisualTheme.CurFontMin * scale;
+		string text = HorizCurBase.Text;
 
-		// 缩到下限还是放不下，就别再硬塞了：改成走马灯。
-		// 这一句现在的单行宽度就是走马灯的「轨道长度」。
-		_marqueeTextWidth = Measure(HorizCurBase.Text, typeface, HorizCurBase.FontSize, brush);
-		// 轨道长度在这里一次算好。放在 FitFontToWidth 而不是 UpdatePan 里，
-		// 是因为 SetMarquee→ResetPan 那一刻就要用到它，
-		// 而那会儿 UpdatePan 还没跑，_panMax 还是上一句的残留值。
-		_panMax = Math.Max(0, _marqueeTextWidth - avail);
-		SetMarquee(_marqueeTextWidth > avail);
+		// 只有一档判断：这一句在当前字号下「宽度够不够」。
+		//
+		// 以前试过「先按可用高度换行把整句打出来，装不下才走马灯」，
+		// 结果长句一换行就出新问题：换行后当前句会占两三行高，
+		// 而擦除矩形的高度是按「一行高」写死的，亮色层和底衬层的
+		// 行数对不上，擦除边界就横在字的中间，看起来像渲染坏了。
+		// 而且换行之后「正在唱的那一段」在第二行，弹窗里那一行的
+		// 上下留白全被当前句吃掉，上下句被挤出可视区。
+		// 所以按长度判断、宽度不够就横着飘，是这里唯一稳的做法。
+		double size = maxSize;
+		while (size > minSize && Measure(text, typeface, size, brush) > budget)
+		{
+			size -= 1;
+		}
+		double textW = Measure(text, typeface, size, brush);
+		bool useMarquee = textW > budget;
+
+		HorizCurBase.FontSize = size;
+		// 两层字号必须一致，否则擦除的亮色层和底层文字对不齐
+		HorizCurLit.FontSize = size;
+
+		// 走马灯的「轨道长度」= 这一句在当前字号下的单行宽度。
+		_panMax = Math.Max(0, Measure(text, typeface, size, brush) - avail);
+		_marqueeTextWidth = Measure(text, typeface, size, brush);
+		SetMarquee(useMarquee);
 	}
 
 	private static double Measure(string text, Typeface typeface, double size, Brush brush)
@@ -1286,19 +1824,7 @@ public partial class LyricWindow : Window
 		if (_horizLitX != null) _horizLitX.X = start;
 	}
 
-	/// <summary>上一句（已唱过）的透明度。</summary>
-	private const double PrevPlayed = 0.22;
-
-	/// <summary>下一句（还没唱到）的透明度。刻意比上一句亮一点，
-	/// 形成「已唱—正在唱—待唱」三档，扫一眼就知道进度。</summary>
-	private const double NextPending = 0.42;
-
-	/// <summary>字号上限。横排当前行的基准字号，长的会往下缩、短的不超过它。</summary>
-	private const double CurFontMax = 21;
-
-	/// <summary>字号下限。再长的句子也保留这个大小，
-	/// 再缩下去在大屏上就读不清了，宁可让它换行。</summary>
-	private const double CurFontMin = 12;
+	// 视觉常量（三行明暗、字号自适应）已集中到 LyricVisualTheme，此处不再各写一份。
 
 	/// <summary>上次算字号时的可用宽度。LayoutUpdated 每次布局都会调，
 	/// 用它挡住「宽度没变就别重算」，否则纯白烧 CPU。</summary>
@@ -1307,7 +1833,7 @@ public partial class LyricWindow : Window
 	/// <summary>只在可用宽度真的变了才重算字号。</summary>
 	private void FitFontToWidthOnce()
 	{
-		if (SettingsManager.Instance.LyricWindowVertical)
+		if (_vertical)
 		{
 			return;
 		}
@@ -1320,7 +1846,7 @@ public partial class LyricWindow : Window
 		FitFontToWidth();
 	}
 
-	/// <summary>横排当前行的逐字擦除 + 走马灯平移。45Hz 调一次。</summary>
+	/// <summary>横排当前行的逐字擦除 + 走马灯平移。走渲染帧（见 OnRendering）。</summary>
 	private void UpdateHorizontalWipe()
 	{
 		if (_bundle == null || _activeIndex < 0 || _activeIndex >= _bundle.Count)
@@ -1333,13 +1859,103 @@ public partial class LyricWindow : Window
 		{
 			return;
 		}
-		double p = _bundle.ProgressOf(_activeIndex, LyricClock.PositionMs);
+		double p = _bundle.ProgressOf(_activeIndex, SmoothedPositionMs());
 
-		// 已播 / 未播的分色就是这两层：底下 TextTertiary（暗）铺满整句，
-		// 上面 TextPrimary（亮）只露出「已经唱过的那一段」。
+		// 已播 / 未播的分色就是这两层：底下未唱色（DlUnsung 定值白）铺满整句，
+		// 上面已唱色（用户配置色或 DlSung）只露出「已经唱过的那一段」。
 		HorizCurClip.Rect = new Rect(0, 0, Math.Clamp(p, 0, 1) * w, HorizCurLit.ActualHeight);
 
-		UpdatePan();
+	}
+
+	// 播放位置是「按缓冲块」更新的：NAudio 每读完一块（几十到一百多毫秒）
+	// 才把 CurrentTime 往前推一截，中间那些帧读到的都是同一个值。
+	// 直接拿它画擦除，擦除矩形就是一格一格往前蹦的 ——
+	// 这正是「动画不够平滑、有阶段被跳过」的另一半原因
+	// （另一半是 ProgressOf 逐字跳，已在 Lyrics.cs 里改成线性）。
+	//
+	// 这里记住「上次读到的位置 + 读到它时的墙钟」，两次之间用真实经过的
+	// 时间补上，最多外推 LeadMs。外推封顶是必须的：音频缓冲真的断了
+	// （切设备、拖进度）时不能让它一直往前跑，凭空画出一段没唱的字。
+	private long _clockPosMs = -1;
+	private double _clockStamp;
+	private const double LeadMs = 90.0;
+
+	private long SmoothedPositionMs()
+	{
+		long pos = LyricClock.PositionMs;
+		if (pos < 0)
+		{
+			return pos;
+		}
+		double now = NowSeconds();
+		if (pos != _clockPosMs)
+		{
+			// 播放器真的往前了：以它为准，重新起算外推。
+			_clockPosMs = pos;
+			_clockStamp = now;
+			return pos;
+		}
+		double lead = Math.Clamp(now - _clockStamp, 0.0, LeadMs / 1000.0);
+		return pos + (long)(lead * 1000.0);
+	}
+
+	/// <summary>换歌、拖进度、切模式之后把外推的起点作废。
+	/// 不作废的话，新歌的头几百毫秒会拿上一首的时间戳去外推，
+	/// 擦除会先冲出去一截再回来。</summary>
+	private void ResetWipeClock()
+	{
+		_clockPosMs = -1;
+		_clockStamp = NowSeconds();
+	}
+
+	// 擦除原来挂在 22ms 的节拍器上，两个问题：
+	// 一是节拍器和渲染不同步，画面会在两帧之间等一下再跳；
+	// 二是 DispatcherTimer 有累积漂移，擦除的推进本身就是不匀的。
+	// 换成 CompositionTarget.Rendering 就是「每个实际呈现的帧都更新一次」，
+	// 60Hz 屏上每帧都动，观感上才是连续的。
+	// 静止状态（没有横排歌词 / 竖排 / 窗口不可见）时自动摘掉，不空烧帧。
+	private bool _renderHooked;
+
+	private void EnsureRenderHook()
+	{
+		if (_renderHooked)
+		{
+			return;
+		}
+		_renderHooked = true;
+		CompositionTarget.Rendering += OnRendering;
+	}
+
+	private void StopRenderHook()
+	{
+		if (!_renderHooked)
+		{
+			return;
+		}
+		_renderHooked = false;
+		CompositionTarget.Rendering -= OnRendering;
+	}
+
+	private void OnRendering(object? sender, EventArgs e)
+	{
+		try
+		{
+			if (_closing || !IsVisible || _bundle == null || _activeIndex < 0)
+			{
+				StopRenderHook();
+				return;
+			}
+			if (_vertical)
+			{
+				StopRenderHook();
+				return;
+			}
+			UpdateHorizontalWipe();
+		}
+		catch
+		{
+			StopRenderHook();
+		}
 	}
 
 	/// <summary>走马灯：整句匀速向左漂移。
@@ -1450,6 +2066,9 @@ public partial class LyricWindow : Window
 
 	private void ApplyMode(bool vertical)
 	{
+		// 不能整体换成 ApplyVisualState()：横排分支的定位/量位/推帧
+		// 必须夹在「面板显隐」（否则量到的是折叠态的 0 高度）和
+		// 「动画源对齐」（否则 _timer 抢在 ApplyHorizontal 前开跑）之间。
 		UpdatePanelVisibility();
 		if (_bundle == null)
 		{
@@ -1461,22 +2080,17 @@ public partial class LyricWindow : Window
 			// 立刻定位到当前该显示的那行，不然切模式的这一帧是空白
 			_activeIndex = _bundle.IndexAt(LyricClock.PositionMs);
 			ApplyHorizontal(_activeIndex);
+			// 手动推一帧：这一帧不能等渲染回调（模式刚切，钩子还没挂上），
+			// 不然窗口会先空一下再亮。
+			ResetWipeClock();
 			UpdateHorizontalWipe();
+			EnsureRenderHook();
 		}
 		// 换模式 = 换动画源。漏了这句，新模式要等到下次切歌才动。
 		SyncAnimationSources();
 	}
 
-	private void ModeButton_Click(object sender, RoutedEventArgs e)
-	{
-		// ToggleButton 自己已经切了 IsChecked，这里读新值
-		bool vertical = ModeButton.IsChecked == true;
-		AppSettings s = SettingsManager.Instance;
-		s.LyricWindowVertical = vertical;
-		SettingsManager.Save(s);
-		ApplyMode(vertical);
-		ModeGlyph.Text = vertical ? "\uE8D2" : "\uE8D1";
-	}
+	// 竖/横切换键撤掉后，模式只在设置里改（LyricWindowVertical），窗口加载时读一次。
 
 	private void TranslationButton_Click(object sender, RoutedEventArgs e)
 	{
@@ -1520,20 +2134,20 @@ public partial class LyricWindow : Window
 internal void ApplyPassthrough(bool on)
 	{
 		_passthrough = on;
-		// 穿透态下整条标题栏透明：平时靠悬停才显出来，
-		// 只有需要的时候才出现，不遮歌词。
-		DragBar.Visibility = Visibility.Visible;
-		DragBar.Opacity = on ? 0.0 : 1.0;
-		// 穿透态把关闭键也收掉。
+		// 键位统一按「鼠标经过才显示」处理，穿透开关也一样。
+		// 以前把穿透键留成常驻（怕开了穿透就再也关不掉），
+		// 但穿透态下光标轮询本来就把整条标题栏当成热区，
+		// 鼠标移上去它就会出现——不需要为它破例常驻。
+		// 键位的具体显隐由 ApplyHoverReveal 统一管，这里只给初值。
+		ApplyBarOpacity(0.0, animate: false);
+		// 关闭键在穿透态下也显示了。
 		//
-		// 留着它有两个问题：一是它跟穿透开关贴在一起，穿透态下这两个键
-		// 挤在正中，误点比误点角落的把手容易得多；二是这个窗口宽，
-		// 看着像一块贴在桌面上的东西，「顺手关一下」会以为关的是它。
-		// 关闭有别的路：托盘、快捷键、歌词窗口右键菜单。
-		CloseButton.Visibility = on ? Visibility.Collapsed : Visibility.Visible;
-		// 穿透开关本身永远不参与淡入淡出——它是「开穿透之后唯一还能
-		// 不靠悬停就点到的东西」。跟着 DragBar 一起透明的话，
-		// 用户就只剩快捷键和托盘两条救生索，窗口自己没有任何出路。
+		// 原来是隐藏的（CloseButton.Visibility = Collapsed），理由是
+		// 「误点关闭会让人找不到窗口」。但键位已经重排成
+		// 「竖横 → 翻译 → 穿透 → 关闭」，关闭和穿透不再挨在一起，
+		// 误关的代价小了很多；而藏起来的代价是：真要关的时候发现
+		// 关闭键不见了，还得先关穿透再关窗口。所以恢复显示。
+		CloseButton.Visibility = Visibility.Visible;
 
 		Root.BorderThickness = on ? new Thickness(0) : new Thickness(1);
 		Root.CornerRadius = on ? new CornerRadius(0) : new CornerRadius(12);
@@ -1541,14 +2155,25 @@ internal void ApplyPassthrough(bool on)
 			: (Brush)TryFindResource("FlyoutBgBrush") ?? Brushes.Transparent;
 		Root.BorderBrush = on ? Brushes.Transparent
 			: (Brush)TryFindResource("FlyoutBorderBrush") ?? Brushes.Transparent;
-		// 阴影会让「只剩字幕」的观感完全不成立，跟着一起关
-		Root.Effect = on ? null : new System.Windows.Media.Effects.DropShadowEffect
+		// 阴影和底色挂在外壳那层（ShadowShell），别挂在内容根上：
+		// Effect 会把整棵子树先渲染成位图再模糊，歌词字边会跟着发虚。
+		// 之前这里给 Root.Effect 赋值，等于每次退出穿透都把模糊又装回去一遍。
+		Root.Effect = null;
+		if (ShadowShell != null)
 		{
-			BlurRadius = 26,
-			ShadowDepth = 4,
-			Opacity = 0.5,
-			Color = System.Windows.Media.Colors.Black
-		};
+			// 穿透态必须连外壳一起透明：整窗是 AllowsTransparency 的分层窗口，
+			// 只要还有一层铺着 FlyoutBgBrush，看起来就还是一块不透明的板。
+			ShadowShell.Background = on ? Brushes.Transparent
+				: (Brush)TryFindResource("FlyoutBgBrush") ?? Brushes.Transparent;
+			ShadowShell.CornerRadius = on ? new CornerRadius(0) : new CornerRadius(12);
+			ShadowShell.Effect = on ? null : new System.Windows.Media.Effects.DropShadowEffect
+			{
+				BlurRadius = 26,
+				ShadowDepth = 4,
+				Opacity = 0.5,
+				Color = System.Windows.Media.Colors.Black
+			};
+		}
 
 		// 穿透态下鼠标消息会落到下面的窗口，但 WM_MOUSEMOVE 仍然发给我们，
 		// 靠它把标题栏「亮一下」，用户才知道这儿能点。不这么做的话穿透态
@@ -1566,34 +2191,303 @@ internal void ApplyPassthrough(bool on)
 			SetWindowLong(h, GwlExStyle,
 				on ? (ex | WsExNoActivate) : (ex & ~WsExNoActivate));
 		}
+
+		// 前景整体换深色系/换回主题色，与背景、边框、阴影一起过渡。
+		// 放在最后：先落背景，前景动画紧随其后，观感是「同一瞬间」换装。
+		ApplyPassthroughTint(on);
 	}
 
-	/// <summary>鼠标停在窗口上沿附近时把标题栏淡入，离开再淡出。
-	/// 纯装饰，全部失败都吞掉：它出问题最多是标题栏不出现，不该影响播放。</summary>
+	// ==================== 穿透态着色 ====================
+	//
+	// 穿透时窗口没有自己的底（Root.Background = Transparent），歌词直接浮在
+	// 用户的桌面/壁纸/网页上 —— 那些多半是亮色的，主题默认的白字会糊成一片。
+	// 所以穿透开启时把全部前景（歌词文字、右上角工具键、底部播放键）
+	// 切到深色系，关闭时动画回主题/自定义色，两个方向都是 200ms 颜色过渡。
+	//
+	// 协调点（为什么不能只在这里改颜色）：
+	//   · AnimateBrush / AnimateRowColor：切句动画会把主题画刷装到 Foreground 上；
+	//   · RestoreBrushLater：动画收尾的定时器会把 {DynamicResource} 装回去；
+	//   · ApplyFontColor：主题/设置变化时会重刷官方颜色。
+	// 这三处都要让位于着色层（见各自的 _passthroughTint 短路），
+	// 否则穿透开着开着字就变回白色了。
+
+	/// <summary>穿透态主文字色：接近纯黑的深灰，亮色壁纸上足够清晰。</summary>
+	private static readonly Color TintStrong = System.Windows.Media.Color.FromRgb(0x1C, 0x1C, 0x1C);
+
+	/// <summary>穿透态次级文字色（未唱层/上一句/下一句/译文/状态行）：
+	/// 带一点透明度的深色，保住「唱到哪了」的层级感。</summary>
+	private static readonly Color TintDim = System.Windows.Media.Color.FromArgb(0xA6, 0x1C, 0x1C, 0x1C);
+
+	private static readonly Duration TintDuration = new Duration(TimeSpan.FromMilliseconds(200));
+
+	/// <summary>穿透着色总开关。on=true 全部前景动画到深色系；
+	/// on=false 动画回主题/自定义色，并把官方前景（资源引用/样式/用户色）装回去。
+	/// 着色已生效时再传 true 也没关系：逐元素 from==to 的会自己跳过。</summary>
+	internal void ApplyPassthroughTint(bool on)
+	{
+		if (!on && !_passthroughTint)
+		{
+			// 本来就没着色，不用恢复。
+			return;
+		}
+		_passthroughTint = on;
+
+		// 2026-11-05 按用户要求收窄着色范围：只染右上角工具键/底部播放键/状态行
+		// 这些「选项类」UI，歌词文字（已唱/未唱/上下句/译文）一律保持
+		// 用户配置色或固定色——之前整窗变黑，歌词在亮壁纸外反而看不清层级。
+		// 恢复目标色按 ApplyFontColor 同一套语义取（仅剩的状态行用固定色）。
+		TintText(StatusText, on, TintDim, null, LyricVisualTheme.DlTertiary);
+
+		// 右上角工具键 + 底部播放键：控件的 Foreground 平时由样式里的
+		// DynamicResource 提供，着色时换成带动画的本地画刷压住样式，
+		// 恢复时清掉本地值让样式重新接管。播放键图标写死了 AccentBrush，单独染。
+		foreach (System.Windows.Controls.Control b in new System.Windows.Controls.Control[]
+		{
+			TranslationButton, PassthroughButton, CloseButton,
+			LyricPrevButton, LyricPlayButton, LyricNextButton
+		})
+		{
+			TintControl(b, on);
+		}
+		TintText(LyricPlayGlyph, on, TintStrong, null, LyricVisualTheme.DlSung);
+
+		// 恢复方向：颜色动画跑完后把官方前景（资源引用/样式/用户色）装回。
+		if (!on)
+		{
+			RestoreOfficialColorsLater();
+		}
+
+		// 竖排歌词行 + 字幕形态一起换（竖排是默认模式，多数人看到的其实是它）。
+		VerticalView.SetPassthroughTint(on);
+	}
+
+	/// <summary>单个文字元素的前景色过渡。on=true 动画到深色；
+	/// on=false 动画回恢复色（用户自定义色优先，否则固定色），
+	/// 官方画刷的装回统一交给 RestoreOfficialColorsLater。
+	/// <paramref name="userHex"/>/<paramref name="restColor"/> 只在恢复方向用。</summary>
+	private void TintText(TextBlock tb, bool on, Color target, string? userHex, Color restColor)
+	{
+		try
+		{
+			Color from = SolidColor(tb.Foreground, target);
+			Color to = on ? target : RestColor(userHex, restColor);
+			if (from == to)
+			{
+				return;
+			}
+			tb.BeginAnimation(TextBlock.ForegroundProperty, null);
+			// 基值必须是终点色：ColorAnimation 默认 FillBehavior=Stop，
+			// 动画结束后回落到基值 —— 基值是起点色的话过渡等于白做。
+			var brush = new System.Windows.Media.SolidColorBrush(to);
+			tb.Foreground = brush;
+			brush.BeginAnimation(System.Windows.Media.SolidColorBrush.ColorProperty,
+				new System.Windows.Media.Animation.ColorAnimation(from, to, TintDuration)
+				{
+					EasingFunction = new System.Windows.Media.Animation.CubicEase
+					{
+						EasingMode = System.Windows.Media.Animation.EasingMode.EaseOut
+					}
+				});
+		}
+		catch
+		{
+			// 着色失败就保持原样，别让歌词窗整体坏掉
+		}
+	}
+
+	/// <summary>控件（按钮）的前景色过渡，逻辑同 TintText。</summary>
+	private void TintControl(System.Windows.Controls.Control b, bool on)
+	{
+		try
+		{
+			Color from = SolidColor(b.Foreground, TintStrong);
+			Color to = on ? TintStrong : LyricVisualTheme.DlUnsung;
+			if (from == to)
+			{
+				return;
+			}
+			b.BeginAnimation(System.Windows.Controls.Control.ForegroundProperty, null);
+			var brush = new System.Windows.Media.SolidColorBrush(to);
+			b.Foreground = brush;
+			brush.BeginAnimation(System.Windows.Media.SolidColorBrush.ColorProperty,
+				new System.Windows.Media.Animation.ColorAnimation(from, to, TintDuration)
+				{
+					EasingFunction = new System.Windows.Media.Animation.CubicEase
+					{
+						EasingMode = System.Windows.Media.Animation.EasingMode.EaseOut
+					}
+				});
+		}
+		catch
+		{
+		}
+	}
+
+	/// <summary>恢复方向的目标色：用户自定义了就用自定义色，空着用固定色（不随主题）。
+	/// 与 ApplyFontColor 的语义保持一致，动画终点和稍后装回的官方画刷一致才不会跳色。</summary>
+	private static Color RestColor(string? userHex, Color restColor)
+	{
+		return string.IsNullOrWhiteSpace(userHex)
+			? restColor
+			: BrushFromHex(userHex, System.Windows.Media.Colors.White).Color;
+	}
+
+	/// <summary>从画刷里读颜色，读不出（渐变/空）就给 fallback。</summary>
+	private static Color SolidColor(System.Windows.Media.Brush? b, Color fallback)
+	{
+		return b is System.Windows.Media.SolidColorBrush sb ? sb.Color : fallback;
+	}
+
+	private DispatcherTimer? _tintRestoreTimer;
+
+	/// <summary>着色退出后把「官方」前景装回去：资源引用 / 样式默认 / 用户自定义色。
+	/// 延到颜色动画跑完再装，避免中途换画刷闪一下；执行时再核对一次
+	/// _passthroughTint —— 「刚关又立刻开」时不能把深色刷掉。
+	/// 多个元素共享一次装回，只排一个定时器。</summary>
+	private void RestoreOfficialColorsLater()
+	{
+		if (_tintRestoreTimer != null)
+		{
+			return;
+		}
+		var t = new DispatcherTimer(DispatcherPriority.Background)
+		{
+			Interval = TimeSpan.FromMilliseconds(TintDuration.TimeSpan.TotalMilliseconds + 40)
+		};
+		_tintRestoreTimer = t;
+		t.Tick += (s, _) =>
+		{
+			t.Stop();
+			_tintRestoreTimer = null;
+			if (_passthroughTint)
+			{
+				return;
+			}
+			try
+			{
+				// 横排的上一句/下一句/状态行：装回固定色（与 XAML 默认一致）。
+				// 不装资源引用：桌面歌词不随主题，装回 {DynamicResource} 的话
+				// 主题一切这些行又跟着变色了。
+				HorizPrev.Foreground = FixedBrush(LyricVisualTheme.DlSecondary);
+				HorizNext.Foreground = FixedBrush(LyricVisualTheme.DlSecondary);
+				StatusText.Foreground = FixedBrush(LyricVisualTheme.DlTertiary);
+				// 按钮本地值清掉，样式里的 DynamicResource 重新接管。
+				// （按钮是窗口 chrome，跟随主题是本来行为，不在「歌词不随主题」范围里。）
+				foreach (System.Windows.Controls.Control b in new System.Windows.Controls.Control[]
+				{
+					TranslationButton, PassthroughButton,
+					LyricPrevButton, LyricPlayButton, LyricNextButton
+				})
+				{
+					b.ClearValue(System.Windows.Controls.Control.ForegroundProperty);
+				}
+				// CloseButton 没有样式可回退，本地值必须先清掉再挂资源引用——
+				// WPF 里本地值优先级高于资源引用，直接 SetResourceReference 会被
+				// 着色时留下的那支本地画刷压住永远不生效，X 就一直停在着色退出
+				// 的固定暗色上，和旁边两个键对不上（正是「X 颜色不对」的原因）。
+				CloseButton.ClearValue(System.Windows.Controls.Control.ForegroundProperty);
+				CloseButton.SetResourceReference(System.Windows.Controls.Control.ForegroundProperty, "TextPrimaryBrush");
+				LyricPlayGlyph.Foreground = FixedBrush(LyricVisualTheme.DlSung);
+				// 当前句两层 + 译文两层 + 竖排：ApplyFontColor 按「自定义色或固定色」
+				// 重新落好，顺带同步竖排和走马灯测量。
+				ApplyFontColor();
+			}
+			catch { }
+		};
+		t.Start();
+	}
+
+	/// <summary>淡入淡出所有键位（标题栏三个 + 底部播放三个）。
+	///
+	/// 全部键位一起淡：标题栏的键和底部的播放键本来就是一组，
+	/// 分开淡会出现「上面出来了下面还没出来」的半截状态。
+	///
+	/// 为什么不淡 DragBar 本身：DragBar 是命中测试认定的可交互区域，
+	/// 它的 Opacity 一旦动到 0，里面的键就跟着一起消失，
+	/// 鼠标也就点不到了（看不见的东西点不着，用户只会以为程序卡住）。
+	/// 只动这些键自己就没有这个问题。
+	///
+	/// animate:false 用于状态切换（开关穿透、切模式），直接落值不要动画。
+	/// ms 是动画时长：显入 180ms 够跟手；收起走 420ms，账面可见地「慢慢收走」。
+	///
+	/// 为什么动画前要先读再设：直接 BeginAnimation(null) 会把 Opacity 打回基值
+	/// （基值是收起态的 0），新动画拿到的起点就是 0，
+	/// 看起来就是瞬间消失。先读当前值（挂着的旧动画还垫着它）设回本地值，
+	/// 再挂新动画，淡出才是真正的「从当前透明度渐变到 0」。</summary>
+	private void ApplyBarOpacity(double v, bool animate, int ms = 180)
+	{
+		foreach (UIElement el in KeyButtons())
+		{
+			// 淡到 0 之后按钮仍然是命中测试的可见元素，会照常吃掉点击。
+			// 表现就是「键位看不见，但点它有反应」，鼠标在那一块怎么按都按不到
+			// 底下的窗口。必须同时把命中测试关掉，那才是真隐藏。
+			if (el is UIElement ue)
+			{
+				ue.IsHitTestVisible = v > 0.01;
+			}
+			if (animate)
+			{
+				double from = el.Opacity;
+				el.BeginAnimation(UIElement.OpacityProperty, null);
+				el.Opacity = from;
+				el.BeginAnimation(UIElement.OpacityProperty,
+					new System.Windows.Media.Animation.DoubleAnimation(from, v,
+						new Duration(TimeSpan.FromMilliseconds(ms)))
+					{
+						EasingFunction = new System.Windows.Media.Animation.CubicEase
+						{
+							EasingMode = System.Windows.Media.Animation.EasingMode.EaseOut
+						}
+					});
+			}
+			else
+			{
+				el.BeginAnimation(UIElement.OpacityProperty, null);
+				el.Opacity = v;
+			}
+		}
+	}
+
+	/// <summary>所有参与淡入淡出的键位。加新键只改这一处，
+	/// 免得出现「某个新加的键忘了加进列表，于是永远常驻」这种漏网。</summary>
+	private UIElement[] KeyButtons() => new UIElement[]
+	{
+		TranslationButton, PassthroughButton, CloseButton,
+		LyricPrevButton, LyricPlayButton, LyricNextButton
+	};
+
+	/// <summary>键位的显隐策略。
+	///
+	/// 用户要的规则：「键位随时隐藏，鼠标经过就动画显示出来全部键位」——
+	/// 穿透和非穿透一视同仁，不再有「非穿透常显」的分支：
+	///
+	/// - 默认收起（opacity 0 + 关命中测试），整片窗口露给歌词；
+	/// - 鼠标进入窗口任何位置（穿透靠 60ms 光标轮询兜底，非穿透靠
+	///   MouseMove）就淡入全部 7 个键（180ms）；
+	/// - 鼠标离开窗口或离开后停留 1.6s 无移动，收回倒计时启动，再收起。
+	///
+	/// 纯装饰性逻辑，全部失败都吞掉：它出问题最多是键位不出现，不该影响播放。</summary>
 	private void ApplyHoverReveal()
 	{
 		try
 		{
 			_hideBarTimer.Stop();
 			_cursorWatchTimer.Stop();
-			// ApplyPassthrough 每切一次开关就跑一遍，这里必须先摘再加，
+			// 每切一次开关就跑一遍，这里必须先摘再加，
 			// 否则 += 会把同一个处理器叠加上去（开穿透两次就触发两遍）。
 			DragBar.MouseEnter -= DragBar_MouseEnter;
 			DragBar.MouseLeave -= DragBar_MouseLeave;
 			MouseMove -= OnHoverMove;
-			if (!_passthrough)
-			{
-				DragBar.Opacity = 1.0;
-				// 非穿透态标题栏常驻，顺手把状态对齐，省得下一次开穿透
-				// 时 _barVisible 还留着 true 而跳过淡入。
-				_barVisible = true;
-				return;
-			}
-			DragBar.Opacity = 0.0;
+			MouseLeave -= OnWindowMouseLeave;
+
+			ApplyBarOpacity(0.0, animate: false);
 			_barVisible = false;
-			// 主路径是轮询：歌词整片都是穿透的，只有它能发现鼠标进来。
+			// 两种模式都跑光标轮询：穿透态背景区是 HTTRANSPARENT，
+			// 靠它兜「鼠标在窗口里但没压在任何控件上」的时刻；
+			// 非穿透态虽然 MouseMove 收得到，但轮询还负责「鼠标早就在
+			// 窗口外」时的收回倒计时（那时窗口根本收不到任何鼠标事件）。
 			_cursorWatchTimer.Start();
-			// 用 DragBar 自己的 MouseEnter/MouseLeave，不靠窗口级 MouseMove。
+			// 用 DragBar 自己的 MouseEnter/MouseLeave，不靠窗口级 MouseMove：
 			// 穿透态下背景区是 HTTRANSPARENT，窗口根本收不到移动消息；
 			// 只有「被判成客户区」的控件才收得到。标题栏既然已经是热区，
 			// 直接在它身上挂事件最可靠，也不依赖 e.GetPosition(this) 的坐标换算。
@@ -1602,44 +2496,110 @@ internal void ApplyPassthrough(bool on)
 			DragBar.MouseEnter += DragBar_MouseEnter;
 			DragBar.MouseLeave += DragBar_MouseLeave;
 			// 键盘/手柄触发的合成鼠标移动没有 MouseEnter，补一份兜底。
+			// 非穿透态整片窗口都能收到 MouseMove，也是靠它点亮的。
 			MouseMove += OnHoverMove;
+			// 离开窗口（只有非穿透态收得到）走同一个倒计时。
+			MouseLeave += OnWindowMouseLeave;
+			// 刚打开时鼠标可能正压在这个窗上，这时先亮着再倒计时，
+			// 别让用户对着一个「键位不见了」的窗口愣一下才反应过来要动鼠标。
+			RevealBarIfCursorInside();
 		}
 		catch (Exception ex)
 		{
-			LogHelper.LogError(ex, "歌词窗标题栏淡入淡出失败");
+			LogHelper.LogError(ex, "歌词窗键位淡入淡出失败");
 		}
 	}
 
+	/// <summary>光标此刻就落在窗口的热区里就直接点亮。切穿透、刚显示出来都用它兜一次。</summary>
+	private void RevealBarIfCursorInside()
+	{
+		try
+		{
+			if (_closing || !TryGetCursorScreenPoint(out Point screen))
+			{
+				return;
+			}
+			Point loc = PointFromScreen(screen);
+			if (IsKeyHotArea(loc))
+			{
+				ShowButtonBar();
+			}
+			else
+			{
+				// 不在热区：给一段宽限再收，避免用户正把鼠标移过来就消失。
+				_hideBarTimer.Stop();
+				_hideBarTimer.Start();
+			}
+		}
+		catch { }
+	}
+
+	/// <summary>光标是不是在「键位该出现」的区域里。
+	///
+	/// 用户要的行为是：开了穿透之后，界面本身继续透明可穿，
+	/// 但键位开始跟着鼠标走 —— 鼠标扫过歌词文字或者弹窗任意一块，
+	/// 全部键位出来；鼠标完全不在这个窗上就一直藏着。
+	///
+	/// 所以穿透态的热区判据就是「光标在不在这个窗口的矩形里」，
+	/// 整片都算，歌词区也算。以前只认标题栏那 40px 和底部播放键，
+	/// 结果鼠标明明压在歌词上，键位还是不见 ——
+	/// 而这恰恰是用户最常把鼠标停的位置。
+	///
+	/// 非穿透态整片窗口都算（反正窗口本身可点，鼠标消息全收得到）。</summary>
+	private bool IsKeyHotArea(Point loc)
+	{
+		bool inside = loc.X >= -2.0 && loc.X <= ActualWidth + 2.0
+			&& loc.Y >= -2.0 && loc.Y <= ActualHeight + 2.0;
+		if (!inside)
+		{
+			return false;
+		}
+		// 尺寸还没量出来的时候不要判定成热区：
+		// ActualWidth/Height 都是 0 时任何点都会「在窗口内」，
+		// 于是刚显示出来的那一瞬不管鼠标在哪都判成在窗口里。
+		if (ActualWidth <= 0 || ActualHeight <= 0)
+		{
+			return false;
+		}
+		return true;
+	}
+
 	/// <summary>轮询全局光标：进窗口就点亮键位，出窗口就开始收回倒计时。
+	///
+	/// 两种模式都跑：穿透态背景区收不到鼠标消息，全靠这里；
+	/// 非穿透态靠它兜「鼠标在窗口外、窗口收不到任何事件」时的收回。
 	///
 	/// 判定用 PointFromScreen 而不是窗口的 Left/Top/ActualWidth：
 	/// GetCursorPos 给的是物理像素，PointFromScreen 负责按当前 DPI 换算成
 	/// 窗口内的逻辑坐标，DPI 缩放和副屏负坐标都由它处理，比自己算稳妥。</summary>
 	private void CursorWatch_Tick(object? sender, EventArgs e)
 	{
-		if (!_passthrough || _closing || !IsLoaded || !IsVisible) return;
+		if (_closing || !IsLoaded || !IsVisible) return;
 		try
 		{
 			if (!TryGetCursorScreenPoint(out Point screen)) return;
 			// 先转成窗口内坐标：留一点余量，免得窗口边缘那一像素
-			// 因为取整被判成「在外面」，鼠标明明压着窗口键位却点不亮。
+			// 因为取整被判成「在外面」，鼠标明明压着键位却点不亮。
 			Point loc = PointFromScreen(screen);
-			bool inside = loc.X >= -2.0 && loc.Y >= -2.0
-				&& loc.X <= ActualWidth + 2.0 && loc.Y <= ActualHeight + 2.0;
 
-			if (inside)
+			if (IsKeyHotArea(loc))
 			{
-				// 鼠标还在窗口里：撤掉「收回」倒计时，别让它在用户
+				// 鼠标还在热区里：撤掉「收回」倒计时，别让它在用户
 				// 正准备去点按钮的时候把键位抽走。
 				_hideBarTimer.Stop();
 				ShowButtonBar();
 			}
 			else if (_barVisible)
 			{
-				// 离开窗口：给 1.6s 宽限再收，免得从歌词区移到键位
+				// 离开热区：给 1.6s 宽限再收，免得从歌词区移到键位
 				// 的那一下路上就把按钮弄没了。
-				_hideBarTimer.Stop();
-				_hideBarTimer.Start();
+				// 只在倒计时没跑起来时启动一次。这里 60ms 一轮，
+				// 之前每轮都 Stop+Start，倒计时永远被重置数不完，
+				// 表现就是键位露过一次之后再也不收了。
+				if (!_hideBarTimer.IsEnabled)
+				{
+					_hideBarTimer.Start();
+				}
 			}
 		}
 		catch (Exception ex)
@@ -1653,21 +2613,12 @@ internal void ApplyPassthrough(bool on)
 	/// 免得每 60ms 重启一次动画。</summary>
 	private void ShowButtonBar()
 	{
-		if (!_passthrough || _closing) return;
+		if (_closing) return;
 		try
 		{
 			if (_barVisible) return;
 			_barVisible = true;
-			DragBar.BeginAnimation(UIElement.OpacityProperty, null);
-			var ease = new System.Windows.Media.Animation.CubicEase
-			{
-				EasingMode = System.Windows.Media.Animation.EasingMode.EaseOut
-			};
-			// 淡入用 130ms：再慢就让人觉得「鼠标都过去了按钮才出现」，
-			// 反而不如不出现。
-			DragBar.BeginAnimation(UIElement.OpacityProperty,
-				new System.Windows.Media.Animation.DoubleAnimation(1.0,
-					new Duration(TimeSpan.FromMilliseconds(130))) { EasingFunction = ease });
+			ApplyBarOpacity(1.0, animate: true);
 		}
 		catch { }
 	}
@@ -1678,10 +2629,25 @@ internal void ApplyPassthrough(bool on)
 		RevealButtonBar();
 	}
 
-	/// <summary>鼠标离开标题栏：开始倒计时，鼠标还在附近就取消。</summary>
+	/// <summary>鼠标离开标题栏：开始倒计时，鼠标还在附近就取消。
+	/// 两种模式共用（键位现在都是悬停显隐，见 ApplyHoverReveal）。</summary>
 	private void DragBar_MouseLeave(object sender, MouseEventArgs e)
 	{
-		if (!_passthrough || _closing) return;
+		if (_closing) return;
+		try
+		{
+			_hideBarTimer.Stop();
+			_hideBarTimer.Start();
+		}
+		catch { }
+	}
+
+	/// <summary>鼠标移出整个窗口（只有非穿透态收得到 MouseLeave）。
+	/// 同样走倒计时而不是直接收：用户把鼠标从窗口里扫出去时
+	/// 按一下就没，很难受。</summary>
+	private void OnWindowMouseLeave(object sender, MouseEventArgs e)
+	{
+		if (_closing) return;
 		try
 		{
 			_hideBarTimer.Stop();
@@ -1692,7 +2658,7 @@ internal void ApplyPassthrough(bool on)
 
 	private void RevealButtonBar()
 	{
-		if (!_passthrough || _closing) return;
+		if (_closing) return;
 		try
 		{
 			// 鼠标还在窗口里，所以撤掉「离开后隐藏」的倒计时。
@@ -1712,15 +2678,101 @@ internal void ApplyPassthrough(bool on)
 		RevealButtonBar();
 	}
 
+	// ---- 底部播放键 ----
+	// 直接调 MusicService，不去找主窗口：主窗口那几个 Click 是 private 的，
+	// 而且歌词窗可能被主窗口最小化带着隐藏，走一遍它反而多一层状态同步。
+	// MusicService 才是唯一的事实来源，主窗口底栏也是调它。
+
+	private void LyricPrevButton_Click(object sender, RoutedEventArgs e)
+	{
+		try
+		{
+			MusicService.PlayPrevious();
+		}
+		catch (Exception ex)
+		{
+			LogHelper.LogError(ex, "歌词窗上一首失败");
+		}
+	}
+
+	private void LyricNextButton_Click(object sender, RoutedEventArgs e)
+	{
+		try
+		{
+			MusicService.PlayNext();
+		}
+		catch (Exception ex)
+		{
+			LogHelper.LogError(ex, "歌词窗下一首失败");
+		}
+	}
+
+	private void LyricPlayButton_Click(object sender, RoutedEventArgs e)
+	{
+		try
+		{
+			// 没有在放歌时按播放键 = 从头播，别只 Resume 一个空的播放器。
+			if (MusicService.NoMusicMode)
+			{
+				MusicService.Resume();
+			}
+			else if (MusicService.IsPlaying)
+			{
+				MusicService.Pause();
+			}
+			else
+			{
+				MusicService.Resume();
+			}
+		}
+		catch (Exception ex)
+		{
+			LogHelper.LogError(ex, "歌词窗播放暂停失败");
+		}
+		// 立刻改图标：等 StateChanged 回来会有一小段延迟（切歌要走网络），
+		// 按下去的那一下看不到变化会让人以为没按到。
+		UpdatePlayGlyph();
+	}
+
+	/// <summary>播放/暂停图标。字形和主窗口底栏一致（E769 暂停 / E768 播放），
+	/// 两处用同一套图标是这个应用的一贯做法。</summary>
+	private void UpdatePlayGlyph()
+	{
+		try
+		{
+			bool playing = MusicService.IsPlaying && !MusicService.NoMusicMode;
+			// 用 \uE769/\uE768 转义而不是把字形直接写进源码：
+			// 这是 Segoe MDL2 的私用区码位，粘进源码后在某些编辑器/
+			// 代码页里会被换成问号，图标就变成空白方块了。
+			LyricPlayGlyph.Text = playing ? "\uE769" : "\uE768";
+			LyricPlayButton.ToolTip = playing ? "暂停" : "播放";
+		}
+		catch { }
+	}
+
+	private void OnMusicStateChanged()
+	{
+		// StateChanged 是从各种线程抛出来的（播放线程、定时器、UI 线程都有），
+		// 这里必须自己切回 UI 线程。
+		if (!Dispatcher.CheckAccess())
+		{
+			Dispatcher.BeginInvoke(new Action(UpdatePlayGlyph));
+			return;
+		}
+		UpdatePlayGlyph();
+	}
+
 	private void HideButtonBarTimer_Tick(object? sender, EventArgs e)
 	{
 		_hideBarTimer.Stop();
-		if (!_passthrough || _closing) return;
+		if (_closing) return;
 		try
 		{
 			_barVisible = false;
-			DragBar.BeginAnimation(UIElement.OpacityProperty, null);
-			DragBar.Opacity = 0.0;
+			// 淡出而不是瞬间消失：和淡入对称，1.6s 静止后慢慢收走，
+			// 比「一眨眼没了」更像「自动收起」而不是「渲染坏了」。
+			// 420ms 收起比 180ms 显入慢一拍，收尾看得见。
+			ApplyBarOpacity(0.0, animate: true, ms: 420);
 		}
 		catch { }
 	}
@@ -1741,18 +2793,14 @@ internal void ApplyPassthrough(bool on)
 		HorizCurBase.RenderTransform = _horizBaseX;
 		HorizCurLit.RenderTransform = _horizLitX;
 
-		// 切句过渡的位移。挂在「整格」上而不是挂在单行文字上：
+		// 切句过渡的变换。挂在「整格」上而不是挂在单行文字上：
 		// 当前句那格是 HorizWipeHost（里面套着擦除用的底色层和亮色层），
 		// 挂在它身上两层会一起动，不会出现亮暗两层错位。
-		// 当前句要同时做「上下摆动」和「选中缩放」，所以是 TransformGroup。
-		// 摆动和缩放必须分成两个独立变换：两者都要长驻循环/长驻写值，
+		// 当前句要同时做「上下摆动」「选中缩放」「上移位移」，所以是 TransformGroup。
+		// 三个变换必须分开：摆动是长驻循环、位移和缩放都是每轮动画重写一次，
 		// 塞进同一个变换里会互相覆盖（谁后写谁生效，另一个直接不动）。
 		_curBob = new TranslateTransform();
 		_curScale = new ScaleTransform(1, 1);
-		var curTransforms = new TransformGroup();
-		curTransforms.Children.Add(_curBob);
-		curTransforms.Children.Add(_curScale);
-		HorizWipeHost.RenderTransform = curTransforms;
 		// 缩放要绕中心缩，不然字会朝左上角缩，看着像在往角上跑。
 		HorizWipeHost.RenderTransformOrigin = new Point(0.5, 0.5);
 		// 翻译两层各挂一个横向位移，才能做出「新句子把旧句子往右顶」。
@@ -1761,26 +2809,36 @@ internal void ApplyPassthrough(bool on)
 		HorizTranslation.RenderTransform = _trIn;
 		HorizTranslationOut.RenderTransform = _trOut;
 
-		// 三行各挂一个竖向位移，给「顶上去」那套动画用。
-		// 挂在行上（而不是像当前句那样挂在整格 TransformGroup 里）是因为
-		// 上移动画和当前句的缩放不同时跑，分开挂互不干扰；
-		// 只有 PushUp 生效时这几个变换才真的会被写值。
+		// 三行各挂一组「竖向位移 + 缩放」，给「顶上去」那套动画用。
+		// 每行一组而不是共用一个位移：三行现在是各走各的轨迹
+		//（上一句往上退并缩小、下一句升进中间并放大、再下一句从下面冒出来），
+		// 共用一个位移就又退回「整块一起挪」了。
 		_prevShift = new TranslateTransform();
 		_curShift = new TranslateTransform();
 		_nextShift = new TranslateTransform();
-		HorizPrev.RenderTransform = _prevShift;
+		_prevScale = new ScaleTransform(1, 1);
+		_nextScale = new ScaleTransform(1, 1);
+		HorizPrev.RenderTransform = new TransformGroup
+		{
+			Children = { _prevShift, _prevScale }
+		};
+		HorizPrev.RenderTransformOrigin = new Point(0.5, 0.5);
 		HorizWipeHost.RenderTransform = new TransformGroup
 		{
 			Children =
 			{
 				// 上移在前、摆动缩放在后：WPF 按顺序相乘，
-				// 顺序反过来的话整块上移会被缩放中心一起带着挪。
+				// 顺序反过来的话上移会被摆动/缩放一起带着挪。
 				_curShift,
 				_curBob,
 				_curScale
 			}
 		};
-		HorizNext.RenderTransform = _nextShift;
+		HorizNext.RenderTransform = new TransformGroup
+		{
+			Children = { _nextShift, _nextScale }
+		};
+		HorizNext.RenderTransformOrigin = new Point(0.5, 0.5);
 	}
 
 /// <summary>窗口消息钩子。做两件事：四边伸缩的命中测试，
@@ -1790,24 +2848,27 @@ internal void ApplyPassthrough(bool on)
 		if (msg == WmNcHitTest && !_closing)
 		{
 			// 顺序有讲究：穿透态先问「在不在可交互区域」。
-			// 那些区域必须回 HTCAPTION/HTCLIENT，不能给 HT*RESIZE，
-			// 否则拖标题栏会变成改窗口大小、拖穿透开关会去拉窗口边。
+			// 那些区域必须回 HTCLIENT，不能给 HT*RESIZE，
+			// 否则拖键位栏会变成改窗口大小、拖穿透开关会去拉窗口边。
 			if (_passthrough)
 			{
 				handled = true;
 				return HitTestPassthrough(lParam);
 			}
-			// 非穿透态：边上给 HT*RESIZE，中间若落在标题栏上给 HTCAPTION。
+			// 非穿透态：只在四边/四角回 HT*RESIZE。
+			//
+			// 键位栏这里必须「不处理」（返回 0 且 handled=false），让命中
+			// 落到 WPF 自己身上，由 DragBar_MouseLeftButtonDown 调 DragMove()。
+			// 之前这里对整条键位栏返回 HTCAPTION，想借系统的原生拖动，
+			// 结果是按下变成了 WM_NCLBUTTONDOWN，WPF 的 MouseLeftButtonDown
+			// 根本不触发——窗口直接拖不动了。
+			// 而且键位栏里的四个键也会被系统当成标题栏的一部分，
+			// 点键位变成「按标题栏」。所以这里不碰它。
 			IntPtr edge = HitTestResizeEdges(lParam);
 			if (edge != IntPtr.Zero)
 			{
 				handled = true;
 				return edge;
-			}
-			if (IsOverDragBar(lParam))
-			{
-				handled = true;
-				return new IntPtr(HtCaption);
 			}
 		}
 		return IntPtr.Zero;
@@ -1821,25 +2882,6 @@ internal void ApplyPassthrough(bool on)
 		return new Point(
 			(short)(v & 0xFFFF),
 			(short)((v >> 16) & 0xFFFF));
-	}
-
-	/// <summary>鼠标是否落在标题栏那条可拖动区域上。
-	/// 拖窗口本来是靠 DragBar 自己的 MouseLeftButtonDown；这里让系统命中测试
-	/// 也把标题栏认成 HTCAPTION，是为了顺带拿到原生行为，
-	/// 比如拖到屏幕边缘时不再有吸附、而是正常移动（这个窗口是跟随歌词的，
-	/// 吸附反而会把它拽到不该在的位置）。</summary>
-	private bool IsOverDragBar(IntPtr lParam)
-	{
-		try
-		{
-			Rect r = ScreenBounds(DragBar);
-			if (r.IsEmpty) return false;
-			return r.Contains(ScreenPointFromLParam(lParam));
-		}
-		catch
-		{
-			return false;
-		}
 	}
 
 	/// <summary>四边 + 四角的伸缩命中测试。返回 IntPtr.Zero 表示不在边上。
@@ -1921,19 +2963,20 @@ internal void ApplyPassthrough(bool on)
 	/// 整条 30px 标题栏设成热区后，鼠标移到上沿就会点亮它；
 	/// 代价是这 30px 不再穿透，属于刻意的取舍。
 	///
-	/// PassthroughButton 在 DragBar 外面（XAML 里单独一层），
-	/// 所以它不受 DragBar 透明度影响，这里要单独列出来才能点到。</summary>
+	/// 底部播放键同理：整条 TransportBar 进列表，否则穿透态下
+	/// 那三个键点了没反应（鼠标直接穿到下面的窗口去了）。</summary>
 	private IEnumerable<FrameworkElement> InteractiveRegions()
 	{
-		// 穿透开关排最前：它在 DragBar 外面，永远是客户区，
-		// 而且在 DragBar 的右边。先判它等于少算一次。
+		// 穿透开关排最前：它在 DragBar 外面，少判一次就是少一次计算。
 		yield return PassthroughButton;
 		yield return DragBar;
-		yield return ModeButton;
 		yield return TranslationButton;
-		// 穿透态下 CloseButton 被 Collapsed 掉了，ScreenBounds 会返回
-		// Rect.Empty 自动跳过，所以不用在这里再判一次可见性。
 		yield return CloseButton;
+		// 底部播放键：连整条栏一起给，键之间那点缝隙也能点到。
+		yield return TransportBar;
+		yield return LyricPrevButton;
+		yield return LyricPlayButton;
+		yield return LyricNextButton;
 	}
 
 	/// <summary>元素在屏幕上的矩形。没布局过（宽度 0）时返回空矩形。</summary>
@@ -1948,7 +2991,6 @@ internal void ApplyPassthrough(bool on)
 	private const int WmNcHitTest = 0x0084;
 	private const int HtClient = 1;
 	private const int HtTransparent = -1;
-	private const int HtCaption = 2;
 
 	// 八条边的伸缩命中码。数值来自 winuser.h 的 WM_NCHITTEST 返回约定：
 	// 单边在 HTLEFT~HTBOTTOM(10~12)，角在 HTTOPLEFT(13)~HTBOTTOMRIGHT(16)。
@@ -2008,32 +3050,157 @@ internal void ApplyPassthrough(bool on)
 		LyricRuntime.Enabled = false;
 	}
 
+	/// <summary>鼠标按在空白处就开始拖动整个窗口。
+	///
+	/// 原来只有 30px 的标题条能拖，那个条还只占标题栏中间一小段，
+	/// 想挪窗口得先精准压在四个键的缝里。现在改成：
+	/// 除了键位、输入框和竖排歌词列表（那些要留给点击/滚轮），
+	/// 窗口里任何地方按住都能拖，包括底部那排控制栏的上沿和四周留白。</summary>
+	private void Surface_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+	{
+		if (e.ButtonState != MouseButtonState.Pressed || e.ChangedButton != MouseButton.Left)
+		{
+			return;
+		}
+		if (!CanDragFrom(e.OriginalSource as DependencyObject))
+		{
+			return;
+		}
+		e.Handled = true;
+		BeginDrag();
+	}
+
+	/// <summary>这个命中的东西能不能当拖动起点。</summary>
+	private static bool CanDragFrom(DependencyObject? node)
+	{
+		while (node is not null)
+		{
+			// 键、输入框、可滚动/可点选的控件一律不拖，
+			// 否则点一下按钮就变成「按住标题栏」，按钮永远按不动。
+			if (node is ButtonBase or TextBoxBase
+				or System.Windows.Controls.Primitives.ScrollBar
+				or ScrollViewer)
+			{
+				return false;
+			}
+			node = node is Visual or System.Windows.Media.Media3D.Visual3D
+				? VisualTreeHelper.GetParent(node)
+				: LogicalTreeHelper.GetParent(node);
+		}
+		return true;
+	}
+
 	/// <summary>标题条拖动。DragMove 要在鼠标按下时调，
 	/// 而且按下之后不能再走别的逻辑，否则窗口会跟着跳一下。</summary>
 	private void DragBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
 	{
-		// 标题条上那排按钮是它的子元素。Button 正常情况下会把这个事件标记成
-		// 已处理，DragMove 不会跑；但那排按钮用的是自定义 ControlTemplate，
-		// 合成点击/某些输入路径下标记会丢，结果是「点一下模式按钮，
-		// 顺手把窗口也拖走了」——点歪一次窗口就跳到别处，用户根本不知道是哪一步。
-		// 所以不指望事件标记，直接看命中的是不是按钮。
 		if (IsInsideButton(e.OriginalSource as DependencyObject))
 		{
 			return;
 		}
-		if (e.ButtonState == MouseButtonState.Pressed && e.ChangedButton == MouseButton.Left)
+		if (e.ButtonState != MouseButtonState.Pressed || e.ChangedButton != MouseButton.Left)
 		{
-			try
-			{
-				DragMove();
-			}
-			catch (InvalidOperationException)
-			{
-				// 鼠标已释放时才会抛，忽略即可
-			}
+			return;
+		}
+		BeginDrag();
+	}
+
+	/// <summary>开始拖动窗口。
+	///
+	/// 原来这里调的是 Window.DragMove()，它是「模态」的：内部发
+	/// WM_NCLBUTTONDOWN(HTCAPTION) 然后在消息循环里等 WM_NCLBUTTONUP。
+	/// 这个窗口是 AllowsTransparency + Topmost，穿透态还带
+	/// WS_EX_NOACTIVATE，这条模态路径拿不到按下/抬起配对，
+	/// DragMove() 直接抛 InvalidOperationException 被 catch 吞掉——
+	/// 表现就是「按下去没反应，拖不动」。
+	///
+	/// 改成自己做：按下时抓一次鼠标并记下基准位置，移动时按位移
+	/// 直接改 Left/Top。这条路径不依赖任何非客户区消息，
+	/// 穿透态、置顶、透明窗口下都能用。
+	///
+	/// 抓鼠标抓在窗口上而不是 DragBar 上：现在可以从窗口任意位置发起
+	/// （见 Surface_MouseLeftButtonDown），抓在 DragBar 上收不到后续移动事件。
+	///
+	/// 点位换算：PointToScreen 给的是物理像素，Left/Top 是 DIP，
+	/// 所以位移要除以 DPI 缩放，否则高 DPI 下窗口会跑得比鼠标快。</summary>
+	private void BeginDrag()
+	{
+		if (_closing || _dragging) return;
+		try
+		{
+			Point grab = PointToScreen(new Point(
+				Mouse.GetPosition(this).X, Mouse.GetPosition(this).Y));
+			_dragOriginScreen = grab;
+			_dragOriginLeft = Left;
+			_dragOriginTop = Top;
+			_dragging = true;
+			CaptureMouse();
+		}
+		catch (Exception ex)
+		{
+			_dragging = false;
+			LogHelper.LogError(ex, "歌词窗开始拖动失败");
+		}
+	}
+
+	private void DragBar_MouseMove(object sender, MouseEventArgs e)
+	{
+		if (!_dragging || _closing) return;
+		if (e.LeftButton != MouseButtonState.Pressed)
+		{
+			EndDrag();
+			return;
+		}
+		try
+		{
+			Point cur = PointToScreen(new Point(
+				Mouse.GetPosition(this).X, Mouse.GetPosition(this).Y));
+			double dxDevice = cur.X - _dragOriginScreen.X;
+			double dyDevice = cur.Y - _dragOriginScreen.Y;
+			DpiScale dpi = VisualTreeHelper.GetDpi(this);
+			Left = _dragOriginLeft + (dpi.DpiScaleX > 0 ? dxDevice / dpi.DpiScaleX : dxDevice);
+			Top = _dragOriginTop + (dpi.DpiScaleY > 0 ? dyDevice / dpi.DpiScaleY : dyDevice);
+		}
+		catch (Exception ex)
+		{
+			EndDrag();
+			LogHelper.LogError(ex, "歌词窗拖动失败");
+		}
+	}
+
+	private void EndDrag()
+	{
+		if (!_dragging) return;
+		_dragging = false;
+		try
+		{
+			if (IsMouseCaptured) ReleaseMouseCapture();
+		}
+		catch { }
+		SaveBounds();
+	}
+
+	/// <summary>抬手：结束拖动并存位置。</summary>
+	private void DragBar_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+	{
+		EndDrag();
+	}
+
+	/// <summary>鼠标被系统抢走（切窗、按 Alt+Tab、弹出菜单）时收尾。
+	/// 不处理的话 _dragging 会一直卡在 true，下次移动鼠标窗口就跟着跑。</summary>
+	private void DragBar_LostMouseCapture(object sender, MouseEventArgs e)
+	{
+		if (_dragging)
+		{
+			_dragging = false;
 			SaveBounds();
 		}
 	}
+
+	private bool _dragging;
+	private Point _dragOriginScreen;
+	private double _dragOriginLeft;
+	private double _dragOriginTop;
 
 	/// <summary>命中点是否落在某个按钮里（从命中元素往上走到 DragBar 为止）。</summary>
 	private bool IsInsideButton(DependencyObject? node)
@@ -2052,8 +3219,9 @@ internal void ApplyPassthrough(bool on)
 	}
 
 
-	/// <summary>右键标题条出菜单：置顶、翻译、刷新歌词、恢复默认位置。</summary>
-	private void DragBar_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
+	/// <summary>右键标题条的菜单：置顶、翻译、穿透、刷新歌词、恢复默认位置。
+	/// 从处理器里整个抽出来，只为让入口一眼看完；各项逻辑一字未改。</summary>
+	private System.Windows.Controls.ContextMenu BuildDragBarContextMenu()
 	{
 		var menu = new System.Windows.Controls.ContextMenu();
 		MenuItem topmost = new() { Header = Loc.Default["lyric_win_topmost"], IsCheckable = true, IsChecked = Topmost };
@@ -2098,6 +3266,13 @@ internal void ApplyPassthrough(bool on)
 		menu.Items.Add(new System.Windows.Controls.Separator());
 		menu.Items.Add(refresh);
 		menu.Items.Add(reset);
+		return menu;
+	}
+
+	/// <summary>右键标题条出菜单。</summary>
+	private void DragBar_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
+	{
+		System.Windows.Controls.ContextMenu menu = BuildDragBarContextMenu();
 		menu.IsOpen = true;
 		e.Handled = true;
 	}
@@ -2108,10 +3283,19 @@ internal void ApplyPassthrough(bool on)
 		_hideBarTimer.Stop();
 		_cursorWatchTimer.Stop();
 		_saveBoundsTimer.Stop();
+		// 擦除改到渲染帧上推进（见 OnRendering），关窗必须摘掉：
+		// 这是静态事件，挂着就把整个窗口钉在内存里。
+		StopRenderHook();
 		// 窗口快没了还留着订阅没有必要，而且它们捕获着 this
 		MouseMove -= OnHoverMove;
+		MouseLeave -= OnWindowMouseLeave;
+		MouseMove -= DragBar_MouseMove;
+		MouseLeftButtonUp -= DragBar_MouseLeftButtonUp;
+		LostMouseCapture -= DragBar_LostMouseCapture;
 		DragBar.MouseEnter -= DragBar_MouseEnter;
 		DragBar.MouseLeave -= DragBar_MouseLeave;
+		MusicService.StateChanged -= OnMusicStateChanged;
+		Loc.Default.LanguageChanged -= OnLanguageChanged;
 		// SaveBounds 里第一行就 if (_closing) return，所以必须先存再置位。
 		// 顺序反了的话，App.Exit() 这条唯一的保存路径永远是空跑，
 		// 表现就是「拖到别处，关掉，再开又回老地方」。

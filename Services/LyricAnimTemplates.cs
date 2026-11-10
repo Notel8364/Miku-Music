@@ -47,6 +47,11 @@ public sealed class LyricAnimTemplate
 	/// <summary>三行上移（PushUp）的时长（毫秒）。</summary>
 	public double PushUpMs { get; init; } = 320;
 
+	/// <summary>唱过的那一句退到「上一句」那一格时的起始缩放。1 = 不缩。
+	/// 这条是给「顶上去」那套用的：那句原本是当前句（大字、居中），
+	/// 一边往上走一边缩回小字，落位才有「缩回去」的交代。</summary>
+	public double PrevShrinkFrom { get; init; } = 1.12;
+
 	/// <summary>来源文件夹；内置模板为 null。</summary>
 	public string? Folder { get; init; }
 
@@ -74,18 +79,25 @@ public static class LyricAnimTemplates
 		PushUpMs = 0,
 	};
 
-	/// <summary>第二套：三行整体上移，下一句升上来、再下一句从下面冒出来。</summary>
+	/// <summary>第二套：逐行错位上移 —— 正在唱的那句退到「上一句」那一格并缩小变淡，
+	/// 下一句升进中间并过渡放大，再下一句从下面冒出来。
+	/// 同时保留浮动（当前句轻轻上下浮）与翻译顶出。</summary>
 	public static readonly LyricAnimTemplate PushUp = new()
 	{
 		Name = "顶上去 · 下一句冒头",
-		Description = "唱到下一句时整块上移一格：当前句被顶到上一行的位置，原来的下一句升进中间，再下一句从下面冒出来。",
+		Description = "逐行错位上移：正在唱的退到上一行的位置并缩小淡出，下一句升进中间时过渡放大，再下一句从下面冒出来。当前句同时有轻微浮动，译文照旧从左把上一句顶出去。",
 		Kind = LyricAnimKind.PushUp,
-		SelectMs = 0,
-		SelectFromScale = 1.0,
+		// 选中过渡在这里是「升进中间时的那一下放大」，必须给时长，
+		// 给 0 就等于没有放大动作了。
+		SelectMs = 300,
+		SelectFromScale = 0.86,
 		TransPushMs = 260,
-		BobAmplitude = 0.0,
-		BobPeriodSeconds = 2.4,
-		PushUpMs = 320,
+		// 摆动留着：用户要的「加上浮动顶出」就是这一项。
+		// 现在三行各走各的，浮动挂在当前句自己身上，不再和整块位移打架。
+		BobAmplitude = 3.0,
+		BobPeriodSeconds = 2.6,
+		PushUpMs = 340,
+		PrevShrinkFrom = 1.14,
 	};
 
 	/// <summary>内置模板的固定顺序：默认永远第一项。</summary>
@@ -278,6 +290,7 @@ public static class LyricAnimTemplates
 			BobAmplitude = Clamp(tf.BobAmplitude ?? def.BobAmplitude, 0, 40),
 			BobPeriodSeconds = Clamp(tf.BobPeriodSeconds ?? def.BobPeriodSeconds, 0.2, 20),
 			PushUpMs = Clamp(tf.PushUpMs ?? def.PushUpMs, 0, 3000),
+			PrevShrinkFrom = Clamp(tf.PrevShrinkFrom ?? def.PrevShrinkFrom, 0.5, 1.5),
 			Folder = folder,
 		};
 	}
@@ -314,5 +327,6 @@ public static class LyricAnimTemplates
 		public double? BobAmplitude { get; set; }
 		public double? BobPeriodSeconds { get; set; }
 		public double? PushUpMs { get; set; }
+		public double? PrevShrinkFrom { get; set; }
 	}
 }

@@ -3,6 +3,7 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:loc="clr-namespace:MusicBox.Services"
              mc:Ignorable="d">
     <Grid>
         <Grid.RowDefinitions>
@@ -11,21 +12,42 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <StackPanel Grid.Row="0" Margin="0,0,0,14">
-            <DockPanel>
-                <TextBlock Text="我的收藏" FontSize="28" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}" DockPanel.Dock="Left"/>
-                <Button x:Name="SyncButton" DockPanel.Dock="Right" HorizontalAlignment="Right" VerticalAlignment="Bottom"
-                        Padding="14,7" Style="{StaticResource AccentButtonStyle}"
-                        Click="SyncButton_Click" Content="从云端同步"/>
-            </DockPanel>
-        </StackPanel>
+        <DockPanel Grid.Row="0" Margin="0,0,0,14">
+            <!-- 云同步按钮已删除，改成与最近播放页同款的「清空」：
+                 按钮文案复用 recent_clear 键（六语言都是同一个「清空/Clear」词），
+                 没有收藏时整键收起（见 RefreshList 末尾）。 -->
+            <Button x:Name="ClearFavButton" DockPanel.Dock="Right" HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                    Padding="12,6" Margin="10,0,0,0"
+                    Click="ClearFavButton_Click"
+                    Content="{Binding Source={x:Static loc:Loc.Default}, Path=Item[recent_clear]}"/>
+            <!-- 搜索栏，和「清空」一起排在标题右边。
+                 从右往左依次是：清空 / 搜索 / 标题。
+                 清除键叠在输入框右侧：不重写 TextBox 模板，只是把按钮压在上面，
+                 这样光标、选区、Placeholder 那些原生行为全不用重新实现。 -->
+            <Grid DockPanel.Dock="Right" Width="240" Height="30" VerticalAlignment="Bottom" Margin="0,0,10,0">
+                <TextBox x:Name="SearchBox" HorizontalAlignment="Stretch"
+                         VerticalAlignment="Stretch" VerticalContentAlignment="Center" FontSize="13"
+                         Padding="8,0,28,0" TextChanged="SearchBox_TextChanged" KeyDown="SearchBox_KeyDown"
+                         ToolTip="{Binding Source={x:Static loc:Loc.Default}, Path=Item[lib_search_hint]}"/>
+                <Button x:Name="ClearSearchButton" Width="24" Height="24" Visibility="Collapsed"
+                        HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,3,0"
+                        Click="ClearSearchButton_Click" ToolTip="{Binding Source={x:Static loc:Loc.Default}, Path=Item[act_clear_search]}">
+                    <TextBlock Text="&#xE711;" FontFamily="Segoe MDL2 Assets" FontSize="11"/>
+                </Button>
+            </Grid>
+            <TextBlock Text="{Binding Source={x:Static loc:Loc.Default}, Path=Item[fav_title]}"
+                       FontSize="28" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+        </DockPanel>
 
         <Border Grid.Row="1" Background="{DynamicResource CardBgBrush}" CornerRadius="10" BorderBrush="{DynamicResource CardBorderBrush}" BorderThickness="1">
             <Grid>
-                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="6">
+                <!-- ScrollViewer 要挂名字：分组头的吸顶（UpdateStickyHeaders）拿它当坐标系，
+                     平台分组折叠也由它滚动时驱动。 -->
+                <ScrollViewer x:Name="FavScroll" VerticalScrollBarVisibility="Auto" Padding="6"
+                              ScrollChanged="FavScroll_ScrollChanged">
                     <ItemsControl x:Name="FavList"/>
                 </ScrollViewer>
-                <TextBlock x:Name="EmptyText" Text="还没有收藏" FontSize="14"
+                <TextBlock x:Name="EmptyText" FontSize="14"
                            Foreground="{DynamicResource TextTertiaryBrush}" HorizontalAlignment="Center" VerticalAlignment="Center"
                            Visibility="Collapsed" TextWrapping="Wrap" TextAlignment="Center" Margin="40,0"/>
             </Grid>

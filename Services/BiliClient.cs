@@ -29,6 +29,9 @@ public sealed class BiliTrack
 
 	public long Play { get; set; }
 
+	/// <summary>评论数，来自搜索结果的 video_review。用于「按评论数排序」。</summary>
+	public long CommentCount { get; set; }
+
 	public string Pic { get; set; } = "";
 
 	public string TypeName { get; set; } = "";
@@ -257,35 +260,86 @@ public static class BiliClient
 		// 结果就是「B站搜不出来」但没人知道卡在哪一步。现在每种失败都记进日志。
 		LastSearchBlocked = false;
 		string lastReason = "";
+		// 一次搜索向前翻几页，凑出更多结果（更像 B 站本体的搜索体验）。
+		// 各页之间留一点间隔避免被风控；某一页为空说明已经到底，提前结束。
+		// 去重按 bvid：跨页可能重复，重复条目只留一条。
+		const int maxPages = 3;
+		var seen = new HashSet<string>(StringComparer.Ordinal);
+		for (int page = 1; page <= maxPages; page++)
+		{
+			var (more, reason) = await SearchPageAsync(keyword, page, maxAttempts, seen, result);
+			if (reason.Length > 0)
+			{
+				lastReason = reason;
+			}
+			if (!more)
+			{
+				break;
+			}
+			if (page < maxPages)
+			{
+				await Task.Delay(600);
+			}
+		}
+		if (result.Count == 0)
+		{
+			// 空结果必须留痕，否则界面上只会看到一片空白，无从排查
+			LogHelper.Log("B站搜索无结果: " + keyword + "  原因=" + (lastReason == "" ? "未知" : lastReason));
+		}
+		return result;
+	}
+
+	/// <summary>拉取某一页的搜索结果并去重并入总结果。more=true 表示还有可能
+	/// 有更多页（本页有新增且没撞风控），外层继续翻下一页；more=false 表示
+	/// 可以收尾（本页为空 / 全是重复 / 被风控兜底完）。reason 带回最后一次
+	/// 失败原因，全部落空时留给日志。</summary>
+	private static async Task<(bool more, string reason)> SearchPageAsync(string keyword, int page, int maxAttempts, HashSet<string> seen, List<BiliTrack> result)
+	{
+		string lastReason = "";
 		for (int attempt = 0; attempt < maxAttempts; attempt++)
 		{
 			try
 			{
-				var tryResult = await SearchWbiOnceAsync(keyword);
+				var tryResult = await SearchWbiOnceAsync(keyword, page);
 				if (tryResult.Tracks.Count > 0)
 				{
-					result = tryResult.Tracks;
-					break;
+					int added = 0;
+					foreach (var t in tryResult.Tracks)
+					{
+						if (t.Bvid.Length > 0 && seen.Add(t.Bvid))
+						{
+							result.Add(t);
+							added++;
+						}
+					}
+					// 本页有新增就继续翻下一页；全是重复的（added==0）说明没有更多了。
+					return (added > 0, "");
 				}
 				lastReason = tryResult.Reason;
 				if (!tryResult.Challenge)
 				{
 					// 不是风控，就是真没结果，再打多少次都一样
-					break;
+					return (false, lastReason);
 				}
 				LastSearchBlocked = true;
 				// 风控时别再猛打。原来是 500/1000ms 连打三次，
 				// 而 B 站是按 IP 限流的，这么打只会把限流窗口越撑越长，结果永远返回空。
 				// 现在退避拉长，并且换非 WBI 的老接口再试一次（它走另一套风控）。
 				await Task.Delay(1500 * (attempt + 1));
-				if (attempt == 0)
+				if (attempt == 0 && page == 1)
 				{
 					var legacy = await SearchLegacyAsync(keyword);
 					if (legacy.Count > 0)
 					{
-						result = legacy;
+						foreach (var t in legacy)
+						{
+							if (t.Bvid.Length > 0 && seen.Add(t.Bvid))
+							{
+								result.Add(t);
+							}
+						}
 						LastSearchBlocked = false;
-						break;
+						return (false, "");
 					}
 				}
 			}
@@ -295,12 +349,8 @@ public static class BiliClient
 				LogHelper.LogError(ex, "B站搜索异常: " + keyword);
 			}
 		}
-		if (result.Count == 0)
-		{
-			// 空结果必须留痕，否则界面上只会看到一片空白，无从排查
-			LogHelper.Log("B站搜索无结果: " + keyword + "  原因=" + (lastReason == "" ? "未知" : lastReason));
-		}
-		return result;
+		// 重试几次仍是风控：停在这页，不继续翻页，避免把限流窗口撑更长。
+		return (false, lastReason);
 	}
 
 	/// <summary>走 WBI 签名的搜索。challenge=true 表示被风控挡了，而不是「没搜到」。</summary>
@@ -376,7 +426,7 @@ public static class BiliClient
 		return await resp.Content.ReadAsStringAsync();
 	}
 
-	private static async Task<SearchAttempt> SearchWbiOnceAsync(string keyword)
+	private static async Task<SearchAttempt> SearchWbiOnceAsync(string keyword, int page)
 	{
 		var result = new List<BiliTrack>();
 		string cookie = await GetFreshCookieAsync();
@@ -385,7 +435,7 @@ public static class BiliClient
 		{
 			["search_type"] = "video",
 			["keyword"] = keyword.Trim(),
-			["page"] = "1",
+			["page"] = page.ToString(),
 			["platform"] = "web",
 			["wts"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString()
 		};
@@ -501,6 +551,12 @@ public static class BiliClient
 		if (item.TryGetProperty("play", out var play)) t.Play = play.ValueKind == JsonValueKind.Number ? play.GetInt64() : 0;
 		if (item.TryGetProperty("pic", out var pic)) t.Pic = (pic.GetString() ?? "").StartsWith("//") ? "https:" + pic.GetString() : pic.GetString() ?? "";
 		if (item.TryGetProperty("typename", out var typeName)) t.TypeName = typeName.GetString() ?? "";
+		// 评论数。搜索接口给的是 video_review（少量稿件会是 review），
+		// 用来做「按评论数排序」——B 站是四个源里唯一白送这个数的。
+		if (item.TryGetProperty("video_review", out var review) && review.ValueKind == JsonValueKind.Number)
+			t.CommentCount = review.GetInt64();
+		else if (item.TryGetProperty("review", out var rv) && rv.ValueKind == JsonValueKind.Number)
+			t.CommentCount = rv.GetInt64();
 		return t;
 	}
 
@@ -613,10 +669,6 @@ public static class BiliClient
 		{
 			return tools;
 		}
-		if (File.Exists(@"E:\BBdown\BBDown.exe"))
-		{
-			return @"E:\BBdown\BBDown.exe";
-		}
 		return null;
 	}
 
@@ -629,15 +681,21 @@ public static class BiliClient
 		{
 			return null;
 		}
+		// 每次下载用独立的临时工作目录。原来所有下载共用 BbDownCacheDir，
+		// 只能靠「目录里最新的音频文件」判断成功与否：缓存里本来就有旧歌时，
+		// 解析失败也会立刻「看到新文件」而误报成功。独立目录天然是空的，
+		// 里面出现的第一个音频文件必然是本次产物；并发下载也互不干扰。
+		string workDir = Path.Combine(BbDownCacheDir, "dl-" + Guid.NewGuid().ToString("N"));
 		try
 		{
 			progress?.Invoke("正在解析B站视频信息…");
 			Directory.CreateDirectory(BbDownCacheDir);
+			Directory.CreateDirectory(workDir);
 			Directory.CreateDirectory(LoginDir);
 			var psi = new ProcessStartInfo
 			{
 				FileName = exe,
-				Arguments = $"\"{track.Bvid}\" --audio-only -p 1 --skip-subtitle --work-dir \"{BbDownCacheDir}\"",
+				Arguments = $"\"{track.Bvid}\" --audio-only -p 1 --skip-subtitle --work-dir \"{workDir}\"",
 				WorkingDirectory = LoginDir,
 				UseShellExecute = false,
 				CreateNoWindow = true,
@@ -662,24 +720,176 @@ public static class BiliClient
 			proc.Start();
 			proc.BeginOutputReadLine();
 			proc.BeginErrorReadLine();
-			using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(30));
-			using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
-			await proc.WaitForExitAsync(linked.Token);
-			if (proc.ExitCode != 0)
+
+			// 整体下载时长上限，跟解析那道闸是两回事：
+			// 解析已经在上面单独掐过了，这儿管的是「解析通了但文件一直下不完」。
+			using var downloadTimer = new CancellationTokenSource(TimeSpan.FromMinutes(30));
+			// 「解析」这一段单独设一道 45 秒的闸。
+			//
+			// BBDown 是一个外部进程，解析要联网查稿件信息。受限稿件、没登录、
+			// B站接口抽风或者 Cookie 过期时，它不会报错退出，就那么干站着，
+			// 而下面那道 30 分钟的兜底只管「下载别太慢」，管不了「一直不出结果」。
+			// 于是表现是：点一下播放，状态栏永远停在「正在解析B站视频信息…」，
+			// 用户既没有声音也等不到提示，只能自己去关窗口。
+			//
+			// 这里不看 BBDown 自己说什么，只看独立工作目录里有没有真的出现音频文件：
+			// 那才是「解析通了、开始下载了」的确切证据。45 秒还没有就地判定失败，
+			// 把进程杀掉，调用方照常走失败分支显示提示。
+			using var resolveTimer = new CancellationTokenSource(TimeSpan.FromSeconds(ResolveTimeoutSeconds));
+			// 注意这里链接的是「外层 ct + 下载超时」，故意不含 resolveTimer.Token。
+			// 之前把解析计时器也链接进了进程等待，于是 45 秒一到，
+		// WaitForExitAsync 直接被取消 —— 哪怕音频早就开始下载了也一样。
+		// 表现是：B站那种三四分钟的曲子必下不完，45 秒准时报失败，
+		// 而日志里什么异常都没有，因为 OperationCanceledException 被当成正常返回吞掉了。
+		using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, downloadTimer.Token);
+		Task exitedTask = proc.WaitForExitAsync(linked.Token);
+		Task<bool> resolvedTask = WaitForNewAudioAsync(workDir, resolveTimer.Token);
+		Task first = await Task.WhenAny(exitedTask, resolvedTask);
+		if (first == resolvedTask)
+		{
+			if (!await resolvedTask)
 			{
+				// 解析阶段超时：进程还在、也还没落任何音频文件。
+				TryKill(proc);
 				return null;
 			}
-			FileInfo? best = FindNewestAudio(BbDownCacheDir);
-			return best?.FullName;
+			// 解析通了，下面只等下载走完。
+		}
+		else
+		{
+			// 进程自己退了，没必要再让解析轮询在后台空转到 45 秒。
+			try
+			{
+				resolveTimer.Cancel();
+			}
+			catch (Exception ex)
+			{
+				LogHelper.LogDebug("停止B站解析计时器失败: " + ex.Message);
+			}
+		}
+		try
+		{
+			await exitedTask;
+		}
+		catch (OperationCanceledException)
+		{
+			// 下载超时或外层取消：把 BBDown（以及它拉起的 ffmpeg）收干净。
+			// 不杀的话工作目录里的文件句柄一直被占着，下次解析会写坏缓存。
+			TryKill(proc);
+			return null;
+		}
+		if (proc.ExitCode != 0)
+		{
+			return null;
+		}
+		// 只认本次工作目录里的产物，再把它们搬回公共缓存目录：
+		// 对外返回的路径与 cache 查找（BiliClient.CacheDir）保持原语义。
+		FileInfo? best = FindNewestAudio(workDir);
+		if (best == null)
+		{
+			return null;
+		}
+		string dest = Path.Combine(BbDownCacheDir, best.Name);
+		if (File.Exists(dest))
+		{
+			return dest;
+		}
+		File.Move(best.FullName, dest);
+		return dest;
 		}
 		catch (OperationCanceledException)
 		{
 			return null;
 		}
-		catch
+		catch (Exception ex)
 		{
+			LogHelper.LogDebug("B站下载失败: " + ex.Message);
 			return null;
 		}
+		finally
+		{
+			try
+			{
+				if (Directory.Exists(workDir))
+				{
+					Directory.Delete(workDir, true);
+				}
+			}
+			catch (Exception ex)
+			{
+				LogHelper.LogDebug("清理B站下载临时目录失败: " + ex.Message);
+			}
+		}
+	}
+
+	/// <summary>解析阶段的上限。超过这个时间还没落文件就当失败。</summary>
+	private const int ResolveTimeoutSeconds = 45;
+
+	private static void TryKill(Process proc)
+	{
+		try
+		{
+			if (!proc.HasExited)
+			{
+				// 连子进程一起杀：BBDown 偶尔会拉起 ffmpeg，只杀父进程的话
+				// 它会继续占着缓存目录的文件句柄，下一次解析会写坏缓存。
+				proc.Kill(entireProcessTree: true);
+			}
+		}
+		catch (Exception ex)
+		{
+			LogHelper.LogDebug("结束BBDown进程失败: " + ex.Message);
+		}
+	}
+
+	/// <summary>缓存目录里最新的那个音频文件（名字+长度+修改时间），用来判断「是不是新多了一个」。</summary>
+	private static string? NewestAudioStamp(string dir)
+	{
+		FileInfo? f = FindNewestAudio(dir);
+		return f == null ? null : f.FullName + "|" + f.Length + "|" + f.LastWriteTimeUtc.Ticks;
+	}
+
+	/// <summary>等目录里出现第一个音频文件（解析通的标志）。超时或取消返回 false。</summary>
+	private static async Task<bool> WaitForNewAudioAsync(string dir, CancellationToken ct)
+	{
+		// 目录是本次下载专用的，基线就是「空」：不需要再取一次快照，
+		// 也就不存在「两次取之间文件刚好落盘、之后怎么比都是没变化」的窗口。
+		string? stamp = null;
+		while (!ct.IsCancellationRequested)
+		{
+			try
+			{
+				if (stamp != NewestAudioStamp(dir))
+				{
+					return true;
+				}
+			}
+			catch (Exception ex)
+			{
+				// 目录正被 BBDown 写、或者刚被清掉，下一轮再看。
+				LogHelper.LogDebug("检查B站下载产物失败: " + ex.Message);
+			}
+			try
+			{
+				await Task.Delay(400, ct);
+			}
+			catch (OperationCanceledException)
+			{
+				// 最后一轮再看一眼：如果取消恰好发生在文件落盘之后，
+				// 照样算解析成功（await Task.WhenAny 那边不一定等得到这个结果，
+				// 这里返回 true 也可能没人读，但绝不能让它带着异常变成 unobserved task）。
+				try
+				{
+					return stamp != NewestAudioStamp(dir);
+				}
+				catch (Exception ex)
+				{
+					LogHelper.LogDebug("取消时检查B站下载产物失败: " + ex.Message);
+					return false;
+				}
+			}
+		}
+		return false;
 	}
 
 	private static FileInfo? FindNewestAudio(string dir)
@@ -792,6 +1002,127 @@ public static class BiliClient
 			LogHelper.LogDebug("B站收藏夹加载异常: " + ex.Message);
 			return null;
 		}
+	}
+
+	/// <summary>列出用户创建的全部收藏夹（音乐库「收藏夹」页的平台歌单列表用）。
+	/// 未登录返回空表。media_count 直接用接口给的值做角标展示。</summary>
+	public static async Task<List<(long Id, string Title, long Count)>> FetchFavoriteFoldersAsync(CancellationToken ct = default)
+	{
+		var folders = new List<(long, string, long)>();
+		if (!HasUserCookie)
+		{
+			return folders;
+		}
+		try
+		{
+			var (ok, mid, _) = await FetchAccountAsync(ct);
+			if (!ok || mid <= 0)
+			{
+				return folders;
+			}
+			var req = new HttpRequestMessage(HttpMethod.Get,
+				"https://api.bilibili.com/x/v3/fav/folder/created/list-all?up_mid=" + mid);
+			req.Headers.Add("Cookie", CookieHeader);
+			var resp = await Http.SendAsync(req, ct);
+			string body = await resp.Content.ReadAsStringAsync(ct);
+			using var doc = JsonDocument.Parse(body);
+			if (doc.RootElement.TryGetProperty("data", out var data) && data.TryGetProperty("list", out var list))
+			{
+				foreach (var item in list.EnumerateArray())
+				{
+					long id = item.TryGetProperty("id", out var idEl) ? idEl.GetInt64() : 0;
+					string title = item.TryGetProperty("title", out var tn) ? tn.GetString() ?? "" : "";
+					long count = item.TryGetProperty("media_count", out var mc) ? mc.GetInt64() : 0;
+					if (id > 0 && title.Length > 0)
+					{
+						folders.Add((id, title, count));
+					}
+				}
+			}
+		}
+		catch (Exception ex)
+		{
+			LogHelper.LogDebug("B站收藏夹列表加载异常: " + ex.Message);
+		}
+		return folders;
+	}
+
+	/// <summary>拉一个收藏夹里的全部视频（自动翻页，单页 20 条按接口上限）。
+	/// 上限 maxVideos 兜底：收藏夹不是歌单，几百个视频的都有，拉满太慢也没用。</summary>
+	public static async Task<List<BiliTrack>> FetchFavoriteFolderTracksAsync(long mediaId, int maxVideos = 300, CancellationToken ct = default)
+	{
+		var tracks = new List<BiliTrack>();
+		if (!HasUserCookie || mediaId <= 0)
+		{
+			return tracks;
+		}
+		try
+		{
+			const int pageSize = 20;
+			for (int pn = 1; pn <= 100 && tracks.Count < maxVideos; pn++)
+			{
+				var req = new HttpRequestMessage(HttpMethod.Get,
+					"https://api.bilibili.com/x/v3/fav/resource/list?media_id=" + mediaId
+					+ "&pn=" + pn + "&ps=" + pageSize + "&platform=web");
+				req.Headers.Add("Cookie", CookieHeader);
+				var resp = await Http.SendAsync(req, ct);
+				string body = await resp.Content.ReadAsStringAsync(ct);
+				int pageGot = 0;
+				using (var doc = JsonDocument.Parse(body))
+				{
+					if (doc.RootElement.TryGetProperty("data", out var data) && data.TryGetProperty("medias", out var medias))
+					{
+						foreach (var item in medias.EnumerateArray())
+						{
+							var t = ParseFavResourceItem(item);
+							if (t != null)
+							{
+								tracks.Add(t);
+								pageGot++;
+							}
+						}
+					}
+				}
+				// 本页一条都没拿到：到底了，收工。
+				if (pageGot == 0)
+				{
+					break;
+				}
+			}
+		}
+		catch (Exception ex)
+		{
+			LogHelper.LogDebug("B站收藏夹内容加载异常: " + ex.Message);
+		}
+		return tracks;
+	}
+
+	/// <summary>fav/resource/list 的单个 medias 条目 → BiliTrack。失效视频
+	/// （bvid 空 / title 空）丢弃，音乐库列表里放着点不了的死条目更糟。</summary>
+	private static BiliTrack? ParseFavResourceItem(JsonElement item)
+	{
+		var t = new BiliTrack();
+		if (item.TryGetProperty("bvid", out var bv)) t.Bvid = bv.GetString() ?? "";
+		if (item.TryGetProperty("title", out var title)) t.Title = StripHtml(title.GetString() ?? "");
+		if (item.TryGetProperty("cover", out var cover))
+		{
+			string c = cover.GetString() ?? "";
+			t.Pic = c.StartsWith("//") ? "https:" + c : c;
+		}
+		if (item.TryGetProperty("duration", out var dur)) t.DurationRaw = FormatSecondsFromInt(dur.GetInt32());
+		if (item.TryGetProperty("cnt_info", out var cnt) && cnt.TryGetProperty("play", out var play))
+		{
+			t.Play = play.GetInt64();
+		}
+		if (item.TryGetProperty("upper", out var up) && up.TryGetProperty("name", out var upn))
+		{
+			t.Author = upn.GetString() ?? "";
+		}
+		if (t.Bvid.Length == 0 || t.Title.Length == 0)
+		{
+			return null;
+		}
+		return t;
 	}
 
 	private static string FormatSecondsFromInt(int total)

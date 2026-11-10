@@ -9,6 +9,9 @@ public static class TrayIconService
 {
 	private static WinForms.NotifyIcon? _icon;
 
+	// NotifyIcon.Text 上限 63 字符，超了会抛 ArgumentException。
+	private const int Limit = 63;
+
 	public static Action? ShowWindowRequested { get; set; }
 
 	public static Action? ToggleWindowRequested { get; set; }
@@ -99,10 +102,10 @@ public static class TrayIconService
 	}
 
 	/// <summary>
-	/// 刷新托盘气泡（鼠标停在托盘图标上弹出来那块）。
-	/// 上行是当前曲名（没有曲名就用文件名），下行固定程序名。
-	/// NotifyIcon.Text 上限 63 字符，超了会抛 ArgumentException，所以必须自己截断；
-	/// 托盘气泡不支持分号以外的富文本，字号统一，视觉上放大字体的效果靠 SMTC 浮层。
+	/// 刷新托盘悬停提示（鼠标停在托盘图标上那块）。
+	/// 单行只放当前曲名（没有曲名就用程序名）——原来「曲名\r\n程序名」两行，
+	/// 用户要求所有托盘提示统一单行化。NotifyIcon.Text 上限 63 字符，
+	/// 超了会抛 ArgumentException，所以必须自己截断。
 	/// </summary>
 	public static void SetNowPlaying(string? title)
 	{
@@ -112,16 +115,9 @@ public static class TrayIconService
 		}
 		try
 		{
-			string head = string.IsNullOrWhiteSpace(title)
+			string text = string.IsNullOrWhiteSpace(title)
 				? AppIdentity.DisplayName
 				: title.Trim();
-			// 留 1 个字符给结尾的 \r\n
-			const int Limit = 63;
-			if (head.Length > Limit - 1)
-			{
-				head = head.Substring(0, Limit - 1);
-			}
-			string text = head + "\r\n" + AppIdentity.DisplayName;
 			if (text.Length > Limit)
 			{
 				text = text.Substring(0, Limit);
@@ -161,7 +157,11 @@ public static class TrayIconService
 		try
 		{
 			if (_icon == null) return;
-			_icon.BalloonTipTitle = AppIdentity.DisplayName;
+			// 标题留空，只写正文：Win11 会把气球转成 Toast，BalloonTipTitle 会
+			// 变成独立的第一行、正文第二行，拼出两行通知。留空标题后 Toast
+			// 就是单行（如「Miku Music 已最小化到系统托盘」）；Toast 头部的
+			// 应用名/图标由 AUMID 注册表登记（AppIdentity）提供，不在这里写。
+			_icon.BalloonTipTitle = string.Empty;
 			_icon.BalloonTipText = text;
 			_icon.ShowBalloonTip(2500);
 		}
